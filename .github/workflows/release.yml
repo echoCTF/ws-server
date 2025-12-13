@@ -87,14 +87,14 @@ jobs:
 
       - name: Upload versioned release assets
         run: |
-          for f in ./binaries/*.zip; do
+          for f in ./binaries/*/*.zip; do
             gh release upload ${{ github.event.inputs.version }} "$f" --clobber
           done
 
       - name: Update latest release
         run: |
           gh release view latest || gh release create latest --notes "Latest release update"
-          for f in ./binaries/*.zip; do
+          for f in ./binaries/*/*.zip; do
             gh release upload latest "$f" --clobber
           done
         env:

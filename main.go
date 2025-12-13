@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -27,6 +28,7 @@ import (
 // /////////////////////
 var (
 	dbDSN      string
+	dbDriver   string
 	serverAddr string
 
 	pongWait   = 60 * time.Second

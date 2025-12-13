@@ -205,9 +205,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}).Info("Player connected")
 
 	// Heartbeats
-	conn.SetReadDeadline(time.Now().Add(pongWait))
+	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(pongWait))
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
 
@@ -215,7 +215,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second))
+			_ = conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second))
 		}
 	}()
 
@@ -271,7 +271,7 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Deliver to all active connections
 		for c := range conns {
-			c.WriteJSON(msg)
+			_ = c.WriteJSON(msg)
 		}
 		logrus.WithFields(logrus.Fields{
 			"server_id":   subjectID,
@@ -332,7 +332,7 @@ func main() {
 		logrus.Info("Shutting down server...")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		server.Shutdown(ctx)
+		_ = server.Shutdown(ctx)
 		closeAllConnections()
 	}()
 

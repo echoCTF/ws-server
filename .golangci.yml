@@ -1,0 +1,56 @@
+# GolangCI-Lint configuration for WS Server project
+# Place at the root of the repository
+
+run:
+  timeout: 5m              # max time for linting
+  tests: true              # include *_test.go files
+  skip-dirs:
+    - scripts              # skip Node.js scripts folder
+  skip-files:
+    - ".*_gen.go"          # skip generated files
+
+linters:
+  enable:
+    - govet                # catch suspicious constructs
+    - errcheck             # check for unchecked errors
+    - staticcheck          # advanced static analysis
+    - gofmt                # code formatting
+    - goimports            # import formatting
+    - ineffassign          # ineffectual assignments
+    - deadcode             # unused code
+    - structcheck          # unused struct fields
+    - unused               # unused constants, functions, vars
+    - gosimple             # simplify code
+    - gocritic             # extra checks for common mistakes
+    - typecheck            # type checking
+    - depguard             # prevent usage of certain packages
+    - prealloc             # suggest preallocating slices
+    - goconst              # detect repeated strings
+    - gocyclo              # detect high cyclomatic complexity
+
+  disable:
+    - funlen               # function length check (optional, can be enabled if desired)
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15     # functions above 15 complexity will be reported
+
+  depguard:
+    list-type: blacklist
+    packages:
+      - fmt                 # disallow fmt.Println in production code (example)
+
+  gofmt:
+    simplify: true          # automatically suggest simplifications
+
+  goimports:
+    local-prefixes: github.com/yourusername/wsserver  # replace with your module path
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - linters:
+        - errcheck
+      text: "Close"          # ignore unchecked Close() calls (common for websockets)

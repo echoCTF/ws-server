@@ -176,18 +176,18 @@ func closeAllConnections() {
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
-		http.Error(w, "missing token", 401)
+		http.Error(w, "missing token", http.StatusUnauthorized)
 		return
 	}
 
 	subjectID, isServer, ok := validateToken(token)
 	if !ok {
-		http.Error(w, "invalid token", 401)
+		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
 
 	if isServer {
-		http.Error(w, "servers cannot connect as players", 403)
+		http.Error(w, "servers cannot connect as players", http.StatusForbidden)
 		return
 	}
 
@@ -236,19 +236,19 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 func publishHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if len(auth) < 7 || auth[:7] != "Bearer " {
-		http.Error(w, "missing token", 401)
+		http.Error(w, "missing token", http.StatusUnauthorized)
 		return
 	}
 	token := auth[7:]
 
 	subjectID, isServer, ok := validateToken(token)
 	if !ok || !isServer {
-		http.Error(w, "invalid server token", 403)
+		http.Error(w, "invalid server token", http.StatusForbidden)
 		return
 	}
 
 	if !allow(subjectID, rateLimit, time.Second) {
-		http.Error(w, "rate limit", 429)
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
 

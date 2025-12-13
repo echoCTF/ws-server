@@ -111,10 +111,28 @@ type Message struct {
 // /////////////////////
 func initDB() error {
 	var err error
-	db, err = sql.Open("sqlite", dbDSN) // or MySQL DSN
+
+	switch dbDriver {
+	case "sqlite":
+		db, err = sql.Open("sqlite", dbDSN)
+
+	case "mysql":
+		db, err = sql.Open("mysql", dbDSN)
+		if err == nil {
+			// Recommended MySQL settings
+			db.SetConnMaxLifetime(time.Minute * 5)
+			db.SetMaxOpenConns(25)
+			db.SetMaxIdleConns(25)
+		}
+
+	default:
+		return fmt.Errorf("unsupported db driver: %s", dbDriver)
+	}
+
 	if err != nil {
 		return err
 	}
+
 	return db.Ping()
 }
 

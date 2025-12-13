@@ -62,6 +62,8 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           path: ./binaries
+      - name: Display structure of downloaded files
+        run: file ./binaries/*/*
 
       - name: Prepare release notes with checksums
         id: release_notes
@@ -69,7 +71,7 @@ jobs:
           echo "## WS Server Release ${{ github.event.inputs.version }}" > notes.md
           echo "" >> notes.md
           echo "**SHA256 checksums:**" >> notes.md
-          for f in ./binaries/*.zip; do
+          for f in ./binaries/*/*.zip; do
             sha=$(sha256sum $f | awk '{print $1}')
             echo "$f: $sha" >> notes.md
           done

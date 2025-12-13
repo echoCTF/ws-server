@@ -22,8 +22,17 @@ jobs:
       - name: Install dependencies
         run: go mod tidy
 
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+      - name: Cache GolangCI-Lint
+        uses: actions/cache@v3
+        continue-on-error: true
         with:
-          version: v1.53.3
+          path: ~/.cache/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('**/go.sum') }}-v2
+          restore-keys: |
+            ${{ runner.os }}-golangci-lint-
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.7.2
           args: ./...

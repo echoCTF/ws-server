@@ -62,6 +62,8 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           path: ./binaries
+      - name: Display structure of downloaded files
+        run: file ./binaries/*
 
       - name: Prepare release notes with checksums
         id: release_notes

@@ -72,7 +72,6 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.version }}
           name: "WS Server ${{ github.event.inputs.version }}"
-          notes: ${{ steps.release_notes.outputs.notes }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

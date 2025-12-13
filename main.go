@@ -119,22 +119,21 @@ func initDB() error {
 }
 
 // Returns: subjectID, isServer, valid
-func validateToken(token string) (string, bool, bool) {
+func validateToken(token string, isServer bool) (string, bool) {
 	const q = `
         SELECT subject_id, is_server
-        FROM ws_tokens
+        FROM ws_token
         WHERE token = ?
+					AND is_server = ?
           AND expires_at > CURRENT_TIMESTAMP
-          AND revoked = 0
         LIMIT 1
     `
 	var sid string
-	var isServer bool
-	err := db.QueryRow(q, token).Scan(&sid, &isServer)
+	err := db.QueryRow(q, token, isServer).Scan(&sid)
 	if err != nil {
-		return "", false, false
+		return "", false
 	}
-	return sid, isServer, true
+	return sid, true
 }
 
 // /////////////////////
@@ -180,14 +179,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subjectID, isServer, ok := validateToken(token)
+	subjectID, ok := validateToken(token, false)
 	if !ok {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	if isServer {
-		http.Error(w, "servers cannot connect as players", http.StatusForbidden)
 		return
 	}
 
@@ -241,8 +235,8 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	token := auth[7:]
 
-	subjectID, isServer, ok := validateToken(token)
-	if !ok || !isServer {
+	subjectID, ok := validateToken(token, true)
+	if !ok {
 		http.Error(w, "invalid server token", http.StatusForbidden)
 		return
 	}

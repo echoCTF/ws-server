@@ -1,54 +1,48 @@
-# GolangCI-Lint configuration for WS Server project
-# Place at the root of the repository
-
+version: "2"
 run:
-  timeout: 5m              # max time for linting
-  tests: true              # include *_test.go files
-
+  tests: true
 linters:
   enable:
-    - govet                # catch suspicious constructs
-    - errcheck             # check for unchecked errors
-    - staticcheck          # advanced static analysis
-    - gofmt                # code formatting
-    - goimports            # import formatting
-    - ineffassign          # ineffectual assignments
-    - unused               # unused constants, functions, vars
-    - gosimple             # simplify code
-    - gocritic             # extra checks for common mistakes
-    - typecheck            # type checking
-    - depguard             # prevent usage of certain packages
-    - prealloc             # suggest preallocating slices
-    - goconst              # detect repeated strings
-    - gocyclo              # detect high cyclomatic complexity
-
+    - depguard
+    - goconst
+    - gocritic
+    - gocyclo
+    - prealloc
   disable:
-    - funlen               # function length check (optional, can be enabled if desired)
-
-linters-settings:
-  gocyclo:
-    min-complexity: 15     # functions above 15 complexity will be reported
-
-  depguard:
-    list-type: blacklist
-    packages:
-      - fmt                 # disallow fmt.Println in production code (example)
-
-  gofmt:
-    simplify: true          # automatically suggest simplifications
-
-  goimports:
-    local-prefixes: github.com/echoCTF/ws-server
-
+    - funlen
+  settings:
+    gocyclo:
+      min-complexity: 15
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - errcheck
+        text: Close
+    paths:
+      - .*_gen.go
+      - scripts
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-dirs:
-    - scripts              # skip Node.js scripts folder
-  exclude-files:
-    - ".*_gen.go"          # skip generated files
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    - linters:
-        - errcheck
-      text: "Close"          # ignore unchecked Close() calls (common for websockets)
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/echoCTF/ws-server
+  exclusions:
+    generated: lax
+    paths:
+      - .*_gen.go
+      - scripts
+      - third_party$
+      - builtin$
+      - examples$

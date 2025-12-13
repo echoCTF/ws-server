@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [linux, windows, darwin, openbsd]
-        goarch: [amd64, arm64]
+        goos: [linux, openbsd]
+        goarch: [amd64]
 
     steps:
       - name: Checkout repository

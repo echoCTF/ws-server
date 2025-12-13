@@ -1,4 +1,4 @@
-name: Go Format Check
+name: Go Format Check (format.yml)
 
 on:
   push:
@@ -37,4 +37,7 @@ jobs:
           echo "Checking goimports..."
           unformatted=$(goimports -l .)
           if [ -n "$unformatted" ]; then
-            echo "The following files are not
+            echo "The following files are not properly goimports-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi

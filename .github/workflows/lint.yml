@@ -1,4 +1,4 @@
-name: lint.yml Lint Go Code
+name: Lint Go Code (lint.yml)
 
 on:
   push:

@@ -1,4 +1,4 @@
-name: release.yml Build and Release WS Server
+name: Build and Release WS Server (release.yml)
 
 on:
   workflow_dispatch:

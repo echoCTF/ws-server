@@ -4,10 +4,6 @@
 run:
   timeout: 5m              # max time for linting
   tests: true              # include *_test.go files
-  skip-dirs:
-    - scripts              # skip Node.js scripts folder
-  skip-files:
-    - ".*_gen.go"          # skip generated files
 
 linters:
   enable:
@@ -45,6 +41,10 @@ linters-settings:
     local-prefixes: github.com/echoCTF/ws-server
 
 issues:
+  exclude-dirs:
+    - scripts              # skip Node.js scripts folder
+  exclude-files:
+    - ".*_gen.go"          # skip generated files
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0

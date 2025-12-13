@@ -83,12 +83,3 @@ jobs:
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update latest release
-        run: |
-          gh release view latest || gh release create latest --notes "Latest release update"
-          for f in ./binaries/*/*.zip; do
-            gh release upload latest "$f" --clobber
-          done
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

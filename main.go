@@ -313,6 +313,7 @@ func initMetrics() {
 // /////////////////////
 func main() {
 	// Command-line flags
+	flag.StringVar(&dbDriver, "db", "sqlite", "Database driver: sqlite or mysql")
 	flag.StringVar(&dbDSN, "dsn", "file:ws_tokens.db?cache=shared", "Database DSN")
 	flag.StringVar(&serverAddr, "addr", ":8080", "Server listen address")
 	flag.Parse()

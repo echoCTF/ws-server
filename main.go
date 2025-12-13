@@ -139,11 +139,11 @@ func initDB() error {
 // Returns: subjectID, isServer, valid
 func validateToken(token string, isServer bool) (string, bool) {
 	const q = `
-        SELECT subject_id, is_server
+        SELECT subject_id
         FROM ws_token
         WHERE token = ?
 					AND is_server = ?
-          AND expires_at > CURRENT_TIMESTAMP
+          AND expires_at > NOW()
         LIMIT 1
     `
 	var sid string

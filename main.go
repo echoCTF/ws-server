@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -27,6 +29,7 @@ import (
 // /////////////////////
 var (
 	dbDSN      string
+	dbDriver   string
 	serverAddr string
 
 	pongWait   = 60 * time.Second
@@ -111,29 +114,53 @@ type Message struct {
 // /////////////////////
 func initDB() error {
 	var err error
-	db, err = sql.Open("sqlite", dbDSN) // or MySQL DSN
+
+	switch dbDriver {
+	case "sqlite":
+		db, err = sql.Open("sqlite", dbDSN)
+
+	case "mysql":
+		db, err = sql.Open("mysql", dbDSN)
+		if err == nil {
+			// Recommended MySQL settings
+			db.SetConnMaxLifetime(time.Minute * 5)
+			db.SetMaxOpenConns(25)
+			db.SetMaxIdleConns(25)
+		}
+
+	default:
+		return fmt.Errorf("unsupported db driver: %s", dbDriver)
+	}
+
 	if err != nil {
 		return err
 	}
+
 	return db.Ping()
 }
 
 // Returns: subjectID, isServer, valid
 func validateToken(token string, isServer bool) (string, bool) {
 	const q = `
-        SELECT subject_id, is_server
+        SELECT subject_id
         FROM ws_token
         WHERE token = ?
 					AND is_server = ?
-          AND expires_at > CURRENT_TIMESTAMP
         LIMIT 1
     `
 	var sid string
 	err := db.QueryRow(q, token, isServer).Scan(&sid)
-	if err != nil {
+	if err == nil {
+		return sid, true
+	}
+
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false
 	}
-	return sid, true
+
+	// real error
+	logrus.WithError(err).Error("validateToken database error")
+	return "", false
 }
 
 // /////////////////////
@@ -294,6 +321,7 @@ func initMetrics() {
 // /////////////////////
 func main() {
 	// Command-line flags
+	flag.StringVar(&dbDriver, "db", "sqlite", "Database driver: sqlite or mysql")
 	flag.StringVar(&dbDSN, "dsn", "file:ws_tokens.db?cache=shared", "Database DSN")
 	flag.StringVar(&serverAddr, "addr", ":8080", "Server listen address")
 	flag.Parse()

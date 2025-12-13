@@ -149,6 +149,7 @@ func validateToken(token string, isServer bool) (string, bool) {
 	var sid string
 	err := db.QueryRow(q, token, isServer).Scan(&sid)
 	if err != nil {
+		fmt.Printf("%v", err)
 		return "", false
 	}
 	return sid, true

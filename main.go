@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -145,16 +146,21 @@ func validateToken(token string, isServer bool) (string, bool) {
         FROM ws_token
         WHERE token = ?
 					AND is_server = ?
-          AND expires_at > NOW()
         LIMIT 1
     `
 	var sid string
 	err := db.QueryRow(q, token, isServer).Scan(&sid)
-	if err != nil {
-		fmt.Printf("%v", err)
+	if err == nil {
+		return sid, true
+	}
+
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false
 	}
-	return sid, true
+
+	// real error
+	logrus.WithError(err).Error("validateToken database error")
+	return "", false
 }
 
 // /////////////////////

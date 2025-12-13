@@ -79,6 +79,8 @@ jobs:
           for f in ./binaries/*/*.zip; do
             gh release upload ${{ github.event.inputs.version }} "$f" --clobber
           done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update latest release
         run: |

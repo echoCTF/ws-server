@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,9 +29,10 @@ import (
 // GLOBAL CONFIG
 // /////////////////////
 var (
-	dbDSN      string
-	dbDriver   string
-	serverAddr string
+	dbDSN          string
+	dbDriver       string
+	serverAddr     string
+	allowedOrigins []string
 
 	pongWait   = 60 * time.Second
 	pingPeriod = 30 * time.Second
@@ -42,9 +44,23 @@ var (
 // /////////////////////
 var (
 	db       *sql.DB
-	upgrader = websocket.Upgrader{}
-	mu       sync.Mutex
-	players  = make(map[string]map[*websocket.Conn]bool)
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			if len(allowedOrigins) == 0 {
+				return true // default: allow all
+			}
+
+			origin := r.Header.Get("Origin")
+			for _, o := range allowedOrigins {
+				if origin == o {
+					return true
+				}
+			}
+			return false
+		},
+	}
+	mu      sync.Mutex
+	players = make(map[string]map[*websocket.Conn]bool)
 
 	// Metrics
 	connections = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -320,11 +336,22 @@ func initMetrics() {
 // MAIN
 // /////////////////////
 func main() {
+	var origins string
+
 	// Command-line flags
 	flag.StringVar(&dbDriver, "db", "sqlite", "Database driver: sqlite or mysql")
 	flag.StringVar(&dbDSN, "dsn", "file:ws_tokens.db?cache=shared", "Database DSN")
 	flag.StringVar(&serverAddr, "addr", ":8080", "Server listen address")
+	flag.StringVar(&origins, "origins", "", "Comma-separated list of allowed origins for WebSocket connections")
+
 	flag.Parse()
+
+	if origins != "" {
+		allowedOrigins = strings.Split(origins, ",")
+		for i := range allowedOrigins {
+			allowedOrigins[i] = strings.TrimSpace(allowedOrigins[i])
+		}
+	}
 
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 	logrus.SetOutput(os.Stdout)

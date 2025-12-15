@@ -158,7 +158,7 @@ func initDB() error {
 // Returns: subjectID, isServer, valid
 func validateToken(token string, isServer bool) (string, bool) {
 	const q = `
-        SELECT subject_id
+        SELECT ifnull(player_id,subject_id)
         FROM ws_token
         WHERE token = ?
 					AND is_server = ?

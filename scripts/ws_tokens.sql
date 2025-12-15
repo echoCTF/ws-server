@@ -1,6 +1,7 @@
 -- ws_tokens.sql
 CREATE TABLE IF NOT EXISTS ws_token (
     token       VARBINARY(32) NOT NULL PRIMARY KEY,
+    player_id   INTEGER(10) UNSIGNED DEFAULT NULL,
     subject_id  VARBINARY(32) NOT NULL,
     is_server   BOOLEAN NOT NULL,
     expires_at  DATETIME(6) NOT NULL

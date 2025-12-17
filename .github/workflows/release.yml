@@ -1,5 +1,7 @@
 name: Build and Release WS Server (release.yml)
-
+permissions:
+  contents: read
+  pull-requests: write
 on:
   workflow_dispatch:
     inputs:

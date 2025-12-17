@@ -57,6 +57,9 @@ jobs:
           path: wsserver-${{ matrix.goos }}-${{ matrix.goarch }}.zip
 
   release:
+    permissions:
+      contents: read
+      pull-requests: write
     needs: build
     runs-on: ubuntu-latest
     steps:

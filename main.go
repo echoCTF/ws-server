@@ -36,10 +36,12 @@ var (
 
 	pongWait   = 60 * time.Second
 	pingPeriod = 30 * time.Second
-	rateLimit  = 10 // messages per second per server token
 
 	offlineTTL                 = 10 * time.Second // how long to hold offline messages
 	maxQueuedMessagesPerPlayer int
+	maxConnectionsPerPlayer    int
+	rateLimit                  int
+	ratePeriod                 time.Duration
 )
 
 // ///////////////////
@@ -265,11 +267,27 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check connection limit
+	mu.Lock()
+	current := len(players[playerID])
+	mu.Unlock()
+	if current >= maxConnectionsPerPlayer {
+		logrus.WithFields(logrus.Fields{
+			"player_id": playerID,
+			"current":   current,
+			"limit":     maxConnectionsPerPlayer,
+		}).Warn("Connection rejected: player has too many concurrent connections")
+		http.Error(w, "too many connections", http.StatusTooManyRequests)
+		return
+	}
+
+	// Upgrade to WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 
+	// Register connection
 	registerConnection(playerID, conn)
 	defer unregisterConnection(playerID, conn)
 
@@ -279,7 +297,29 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		"ip":        r.RemoteAddr,
 	}).Info("Player connected")
 
-	// Heartbeats
+	// Flush pending messages (offline queue)
+	pendingMu.Lock()
+	msgs := pendingMessages[playerID]
+	if len(msgs) > 0 {
+		for _, pm := range msgs {
+			if time.Since(pm.timestamp) <= offlineTTL {
+				_ = conn.WriteJSON(pm.msg)
+				messagesDelivered.Inc()
+
+				logrus.WithFields(logrus.Fields{
+					"player_id": playerID,
+					"event":     pm.msg.Event,
+					"queued_at": pm.timestamp,
+					"age_ms":    time.Since(pm.timestamp).Milliseconds(),
+					"source":    "offline_queue",
+				}).Info("Delivered queued WS message")
+			}
+		}
+		delete(pendingMessages, playerID)
+	}
+	pendingMu.Unlock()
+
+	// Heartbeat (ping/pong)
 	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -294,11 +334,13 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Main read loop
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			break
 		}
 	}
+
 	logrus.WithFields(logrus.Fields{
 		"player_id": playerID,
 		"event":     "ws_disconnect",
@@ -322,7 +364,7 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !allow(subjectID, rateLimit, time.Second) {
+	if !allow(subjectID, rateLimit, ratePeriod) {
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
@@ -447,6 +489,10 @@ func main() {
 	flag.StringVar(&serverAddr, "addr", ":8080", "Server address")
 	flag.StringVar(&origins, "origins", "", "Allowed WS origins")
 	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "Maximum queued messages per player")
+	flag.IntVar(&rateLimit, "rate-limit", 10, "Number of messages allowed per rate-period per server token")
+	flag.DurationVar(&ratePeriod, "rate-period", time.Second, "Duration for rate limiting (e.g., 1s, 500ms)")
+	flag.IntVar(&maxConnectionsPerPlayer, "max-conns", 5, "Maximum concurrent WebSocket connections per player")
+
 	flag.Parse()
 
 	if origins != "" {

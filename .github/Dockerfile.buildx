@@ -1,0 +1,20 @@
+# requires BuildKit
+FROM golang:1.25-alpine3.23 AS builder
+
+WORKDIR /build
+
+ARG CGO_ENABLED=0
+
+ARG GOCACHE=/root/.cache/go-build
+ARG GOMODCACHE=/root/.cache/go-mod
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+  --mount=type=cache,target=/root/.cache/go-mod \
+  --mount=type=bind,source=.,target=/build \
+  go build
+
+FROM scratch
+
+COPY --from=builder /ws-server /ws-server/ws-server
+
+CMD ["/ws-server/ws-server"]

@@ -25,9 +25,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// /////////////////////
+// ///////////////////
 // GLOBAL CONFIG
-// /////////////////////
+// ///////////////////
 var (
 	dbDSN          string
 	dbDriver       string
@@ -37,19 +37,21 @@ var (
 	pongWait   = 60 * time.Second
 	pingPeriod = 30 * time.Second
 	rateLimit  = 10 // messages per second per server token
+
+	offlineTTL                 = 10 * time.Second // how long to hold offline messages
+	maxQueuedMessagesPerPlayer int
 )
 
-// /////////////////////
+// ///////////////////
 // GLOBALS
-// /////////////////////
+// ///////////////////
 var (
 	db       *sql.DB
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			if len(allowedOrigins) == 0 {
-				return true // default: allow all
+				return true
 			}
-
 			origin := r.Header.Get("Origin")
 			for _, o := range allowedOrigins {
 				if origin == o {
@@ -59,8 +61,13 @@ var (
 			return false
 		},
 	}
+
 	mu      sync.Mutex
 	players = make(map[string]map[*websocket.Conn]bool)
+
+	// Offline messages
+	pendingMu       sync.Mutex
+	pendingMessages = make(map[string][]pendingMessage)
 
 	// Metrics
 	connections = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -76,14 +83,14 @@ var (
 		Help: "Total messages successfully sent to connected players",
 	})
 
-	// Rate limiting per server token
+	// Rate limiting
 	limiters = make(map[string]*limiter)
 	lm       sync.Mutex
 )
 
-// /////////////////////
+// ///////////////////
 // RATE LIMITER
-// /////////////////////
+// ///////////////////
 type limiter struct {
 	tokens int
 	last   time.Time
@@ -116,48 +123,47 @@ func allow(key string, rate int, per time.Duration) bool {
 	return false
 }
 
-// ////////////////////////
-// BROADCAST MESSAGE STRUCT
-// ////////////////////////
-type BroadcastMessage struct {
-	PlayerID *string     `json:"player_id,omitempty"`
-	Event    string      `json:"event"`
-	Payload  interface{} `json:"payload"`
-}
-
+// ///////////////////
+// MESSAGE TYPES
+// ///////////////////
 type WSMessage struct {
 	Event   string      `json:"event"`
 	Payload interface{} `json:"payload"`
 }
 
-// /////////////////////
-// MESSAGE STRUCT
-// /////////////////////
 type Message struct {
 	PlayerID string      `json:"player_id"`
 	Event    string      `json:"event"`
 	Payload  interface{} `json:"payload"`
 }
 
-// /////////////////////
-// DB FUNCTIONS
-// /////////////////////
+type BroadcastMessage struct {
+	PlayerID *string     `json:"player_id,omitempty"`
+	Event    string      `json:"event"`
+	Payload  interface{} `json:"payload"`
+}
+
+type pendingMessage struct {
+	msg       WSMessage
+	timestamp time.Time
+}
+
+// ///////////////////
+// DB
+// ///////////////////
 func initDB() error {
 	var err error
 
 	switch dbDriver {
 	case "sqlite":
 		db, err = sql.Open("sqlite", dbDSN)
-
 	case "mysql":
 		db, err = sql.Open("mysql", dbDSN)
 		if err == nil {
-			// Recommended MySQL settings
-			db.SetConnMaxLifetime(time.Minute * 5)
+			db.SetConnMaxLifetime(5 * time.Minute)
 			db.SetMaxOpenConns(25)
 			db.SetMaxIdleConns(25)
 		}
-
 	default:
 		return fmt.Errorf("unsupported db driver: %s", dbDriver)
 	}
@@ -165,45 +171,62 @@ func initDB() error {
 	if err != nil {
 		return err
 	}
-
 	return db.Ping()
 }
 
-// Returns: subjectID, isServer, valid
 func validateToken(token string, isServer bool) (string, bool) {
 	const q = `
-        SELECT ifnull(player_id,subject_id)
-        FROM ws_token
-        WHERE token = ?
-					AND is_server = ?
-        LIMIT 1
-    `
+		SELECT IFNULL(player_id, subject_id)
+		FROM ws_token
+		WHERE token = ?
+		  AND is_server = ?
+		LIMIT 1
+	`
 	var sid string
 	err := db.QueryRow(q, token, isServer).Scan(&sid)
 	if err == nil {
 		return sid, true
 	}
-
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false
 	}
-
-	// real error
-	logrus.WithError(err).Error("validateToken database error")
+	logrus.WithError(err).Error("validateToken error")
 	return "", false
 }
 
-// /////////////////////
-// WS CONNECTION MANAGEMENT
-// /////////////////////
+// ///////////////////
+// CONNECTION MANAGEMENT
+// ///////////////////
 func registerConnection(playerID string, c *websocket.Conn) {
 	mu.Lock()
-	defer mu.Unlock()
 	if players[playerID] == nil {
 		players[playerID] = make(map[*websocket.Conn]bool)
 	}
 	players[playerID][c] = true
+	mu.Unlock()
+
 	connections.Inc()
+
+	// Flush pending messages
+	pendingMu.Lock()
+	msgs := pendingMessages[playerID]
+	if len(msgs) > 0 {
+		for _, pm := range msgs {
+			if time.Since(pm.timestamp) <= offlineTTL {
+				_ = c.WriteJSON(pm.msg)
+				messagesDelivered.Inc()
+				logrus.WithFields(logrus.Fields{
+					"player_id": playerID,
+					"event":     pm.msg.Event,
+					"queued_at": pm.timestamp,
+					"age_ms":    time.Since(pm.timestamp).Milliseconds(),
+					"source":    "offline_queue",
+				}).Info("Delivered queued message")
+			}
+		}
+		delete(pendingMessages, playerID)
+	}
+	pendingMu.Unlock()
 }
 
 func unregisterConnection(playerID string, c *websocket.Conn) {
@@ -226,9 +249,9 @@ func closeAllConnections() {
 	}
 }
 
-// /////////////////////
+// ///////////////////
 // WS HANDLER
-// /////////////////////
+// ///////////////////
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -236,7 +259,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subjectID, ok := validateToken(token, false)
+	playerID, ok := validateToken(token, false)
 	if !ok {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
@@ -246,11 +269,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	registerConnection(subjectID, conn)
-	defer unregisterConnection(subjectID, conn)
+
+	registerConnection(playerID, conn)
+	defer unregisterConnection(playerID, conn)
 
 	logrus.WithFields(logrus.Fields{
-		"player_id": subjectID,
+		"player_id": playerID,
 		"event":     "ws_connect",
 		"ip":        r.RemoteAddr,
 	}).Info("Player connected")
@@ -276,17 +300,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logrus.WithFields(logrus.Fields{
-		"player_id": subjectID,
+		"player_id": playerID,
 		"event":     "ws_disconnect",
 	}).Info("Player disconnected")
 }
 
-// /////////////////////
+// ///////////////////
 // PUBLISH HANDLER
-// /////////////////////
+// ///////////////////
 func publishHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
-	if len(auth) < 7 || auth[:7] != "Bearer " {
+	if !strings.HasPrefix(auth, "Bearer ") {
 		http.Error(w, "missing token", http.StatusUnauthorized)
 		return
 	}
@@ -305,28 +329,40 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 
 	var msg Message
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		http.Error(w, "bad request", 400)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+
+	wsMsg := WSMessage{Event: msg.Event, Payload: msg.Payload}
 
 	mu.Lock()
 	conns := players[msg.PlayerID]
 	numConns := len(conns)
+
 	if numConns == 0 {
-		// Player not connected
 		logrus.WithFields(logrus.Fields{
 			"subject_id": subjectID,
 			"player_id":  msg.PlayerID,
 			"event":      msg.Event,
-		}).Warn("Attempted to publish message, but player not connected")
-	} else {
-		// Deliver to all active connections
-		wsMsg := WSMessage{
-			Event:   msg.Event,
-			Payload: msg.Payload,
+		}).Warn("Player not connected, queueing message")
+
+		pendingMu.Lock()
+		queue := pendingMessages[msg.PlayerID]
+		if len(queue) >= maxQueuedMessagesPerPlayer {
+			// Drop oldest
+			queue = queue[1:]
+			logrus.WithFields(logrus.Fields{
+				"player_id": msg.PlayerID,
+				"event":     msg.Event,
+				"limit":     maxQueuedMessagesPerPlayer,
+			}).Warn("Offline queue full, dropping oldest message")
 		}
+		pendingMessages[msg.PlayerID] = append(queue, pendingMessage{msg: wsMsg, timestamp: time.Now()})
+		pendingMu.Unlock()
+	} else {
 		for c := range conns {
 			_ = c.WriteJSON(wsMsg)
+			messagesDelivered.Inc()
 		}
 		logrus.WithFields(logrus.Fields{
 			"subject_id":  subjectID,
@@ -334,21 +370,20 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 			"event":       msg.Event,
 			"connections": numConns,
 		}).Info("Message delivered to player")
+
 	}
 	mu.Unlock()
 
 	messagesPublished.Inc()
-	messagesDelivered.Add(float64(numConns))
-
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 }
 
-// /////////////////////
+// ///////////////////
 // BROADCAST HANDLER
-// /////////////////////
+// ///////////////////
 func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
-	if len(auth) < 7 || auth[:7] != "Bearer " {
+	if !strings.HasPrefix(auth, "Bearer ") {
 		http.Error(w, "missing token", http.StatusUnauthorized)
 		return
 	}
@@ -371,79 +406,51 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wsMsg := WSMessage{
-		Event:   req.Event,
-		Payload: req.Payload,
-	}
+	wsMsg := WSMessage{Event: req.Event, Payload: req.Payload}
 
 	mu.Lock()
 	defer mu.Unlock()
 
-	totalConnections := 0
-
-	// Targeted broadcast
 	if req.PlayerID != nil {
-		conns := players[*req.PlayerID]
-		for c := range conns {
+		for c := range players[*req.PlayerID] {
 			_ = c.WriteJSON(wsMsg)
-			totalConnections++
+			messagesDelivered.Inc()
 		}
-
-		logrus.WithFields(logrus.Fields{
-			"subject_id":  subjectID,
-			"player_id":   *req.PlayerID,
-			"event":       req.Event,
-			"connections": totalConnections,
-		}).Info("Targeted broadcast delivered")
-
 	} else {
-		// Global broadcast
 		for _, conns := range players {
 			for c := range conns {
 				_ = c.WriteJSON(wsMsg)
-				totalConnections++
+				messagesDelivered.Inc()
 			}
 		}
-
-		logrus.WithFields(logrus.Fields{
-			"subject_id":  subjectID,
-			"event":       req.Event,
-			"connections": totalConnections,
-		}).Info("Global broadcast delivered")
 	}
 
 	messagesPublished.Inc()
-	messagesDelivered.Add(float64(totalConnections))
-
 	w.WriteHeader(http.StatusOK)
 }
 
-// /////////////////////
+// ///////////////////
 // METRICS
-// /////////////////////
+// ///////////////////
 func initMetrics() {
 	prometheus.MustRegister(connections, messagesPublished, messagesDelivered)
 }
 
-// /////////////////////
+// ///////////////////
 // MAIN
-// /////////////////////
+// ///////////////////
 func main() {
 	var origins string
 
-	// Command-line flags
-	flag.StringVar(&dbDriver, "db", "sqlite", "Database driver: sqlite or mysql")
+	flag.StringVar(&dbDriver, "db", "sqlite", "Database driver")
 	flag.StringVar(&dbDSN, "dsn", "file:ws_tokens.db?cache=shared", "Database DSN")
-	flag.StringVar(&serverAddr, "addr", ":8080", "Server listen address")
-	flag.StringVar(&origins, "origins", "", "Comma-separated list of allowed origins for WebSocket connections")
-
+	flag.StringVar(&serverAddr, "addr", ":8080", "Server address")
+	flag.StringVar(&origins, "origins", "", "Allowed WS origins")
+	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "Maximum queued messages per player")
 	flag.Parse()
 
 	if origins != "" {
 		allowedOrigins = strings.Split(origins, ",")
-		for i := range allowedOrigins {
-			allowedOrigins[i] = strings.TrimSpace(allowedOrigins[i])
-		}
 	}
 
 	logrus.SetFormatter(&logrus.JSONFormatter{})
@@ -451,10 +458,33 @@ func main() {
 	logrus.SetLevel(logrus.InfoLevel)
 
 	if err := initDB(); err != nil {
-		log.Fatalf("DB init failed: %v", err)
+		log.Fatal(err)
 	}
 
 	initMetrics()
+
+	// Cleanup expired offline messages
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		for range ticker.C {
+			now := time.Now()
+			pendingMu.Lock()
+			for pid, msgs := range pendingMessages {
+				filtered := msgs[:0]
+				for _, pm := range msgs {
+					if now.Sub(pm.timestamp) <= offlineTTL {
+						filtered = append(filtered, pm)
+					}
+				}
+				if len(filtered) == 0 {
+					delete(pendingMessages, pid)
+				} else {
+					pendingMessages[pid] = filtered
+				}
+			}
+			pendingMu.Unlock()
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wsHandler)
@@ -462,12 +492,8 @@ func main() {
 	mux.HandleFunc("/broadcast", broadcastHandler)
 	mux.Handle("/metrics", promhttp.Handler())
 
-	server := &http.Server{
-		Addr:    serverAddr,
-		Handler: mux,
-	}
+	server := &http.Server{Addr: serverAddr, Handler: mux}
 
-	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -480,7 +506,5 @@ func main() {
 	}()
 
 	logrus.Infof("Server listening on %s", serverAddr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logrus.Fatalf("Server failed: %v", err)
-	}
+	log.Fatal(server.ListenAndServe())
 }

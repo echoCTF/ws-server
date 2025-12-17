@@ -11,7 +11,8 @@ ARG GOMODCACHE=/root/.cache/go-mod
 RUN --mount=type=cache,target=/root/.cache/go-build \
   --mount=type=cache,target=/root/.cache/go-mod \
   --mount=type=bind,source=.,target=/build \
-  go build
+  go build -o /ws-server main.go
+
 
 FROM scratch
 

@@ -116,6 +116,20 @@ func allow(key string, rate int, per time.Duration) bool {
 	return false
 }
 
+// ////////////////////////
+// BROADCAST MESSAGE STRUCT
+// ////////////////////////
+type BroadcastMessage struct {
+	PlayerID *string     `json:"player_id,omitempty"`
+	Event    string      `json:"event"`
+	Payload  interface{} `json:"payload"`
+}
+
+type WSMessage struct {
+	Event   string      `json:"event"`
+	Payload interface{} `json:"payload"`
+}
+
 // /////////////////////
 // MESSAGE STRUCT
 // /////////////////////
@@ -301,17 +315,21 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 	if numConns == 0 {
 		// Player not connected
 		logrus.WithFields(logrus.Fields{
-			"server_id": subjectID,
-			"player_id": msg.PlayerID,
-			"event":     msg.Event,
+			"subject_id": subjectID,
+			"player_id":  msg.PlayerID,
+			"event":      msg.Event,
 		}).Warn("Attempted to publish message, but player not connected")
 	} else {
 		// Deliver to all active connections
+		wsMsg := WSMessage{
+			Event:   msg.Event,
+			Payload: msg.Payload,
+		}
 		for c := range conns {
-			_ = c.WriteJSON(msg)
+			_ = c.WriteJSON(wsMsg)
 		}
 		logrus.WithFields(logrus.Fields{
-			"server_id":   subjectID,
+			"subject_id":  subjectID,
 			"player_id":   msg.PlayerID,
 			"event":       msg.Event,
 			"connections": numConns,
@@ -323,6 +341,81 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 	messagesDelivered.Add(float64(numConns))
 
 	w.WriteHeader(200)
+}
+
+// /////////////////////
+// BROADCAST HANDLER
+// /////////////////////
+func broadcastHandler(w http.ResponseWriter, r *http.Request) {
+	auth := r.Header.Get("Authorization")
+	if len(auth) < 7 || auth[:7] != "Bearer " {
+		http.Error(w, "missing token", http.StatusUnauthorized)
+		return
+	}
+	token := auth[7:]
+
+	subjectID, ok := validateToken(token, true)
+	if !ok {
+		http.Error(w, "invalid server token", http.StatusForbidden)
+		return
+	}
+
+	if !allow(subjectID, rateLimit, time.Second) {
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
+
+	var req BroadcastMessage
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	wsMsg := WSMessage{
+		Event:   req.Event,
+		Payload: req.Payload,
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	totalConnections := 0
+
+	// Targeted broadcast
+	if req.PlayerID != nil {
+		conns := players[*req.PlayerID]
+		for c := range conns {
+			_ = c.WriteJSON(wsMsg)
+			totalConnections++
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"subject_id":  subjectID,
+			"player_id":   *req.PlayerID,
+			"event":       req.Event,
+			"connections": totalConnections,
+		}).Info("Targeted broadcast delivered")
+
+	} else {
+		// Global broadcast
+		for _, conns := range players {
+			for c := range conns {
+				_ = c.WriteJSON(wsMsg)
+				totalConnections++
+			}
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"subject_id":  subjectID,
+			"event":       req.Event,
+			"connections": totalConnections,
+		}).Info("Global broadcast delivered")
+	}
+
+	messagesPublished.Inc()
+	messagesDelivered.Add(float64(totalConnections))
+
+	w.WriteHeader(http.StatusOK)
 }
 
 // /////////////////////
@@ -366,6 +459,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wsHandler)
 	mux.HandleFunc("/publish", publishHandler)
+	mux.HandleFunc("/broadcast", broadcastHandler)
 	mux.Handle("/metrics", promhttp.Handler())
 
 	server := &http.Server{

@@ -16,6 +16,6 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM scratch
 
-COPY --from=builder /ws-server /ws-server/ws-server
+COPY --from=builder /ws-server /usr/local/bin/wsserver
 
-CMD ["/ws-server/ws-server"]
+ENTRYPOINT [ "/usr/local/bin/wsserver" ]

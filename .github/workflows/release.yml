@@ -111,5 +111,5 @@ jobs:
         with:
           file: ./.github/Dockerfile.buildx
           context: .
-          push: false
+          push: true
           tags: echothrust/wsserver:latest

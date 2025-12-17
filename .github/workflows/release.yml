@@ -1,6 +1,6 @@
 name: Build and Release WS Server (release.yml)
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 on:
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
 
   release:
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
     needs: build
     runs-on: ubuntu-latest

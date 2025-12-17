@@ -85,12 +85,14 @@ A lightweight WebSocket gateway for delivering real-time messages to players, wi
 Required table:
 
 ```sql
-CREATE TABLE ws_token (
-  token TEXT PRIMARY KEY,
-  player_id TEXT,
-  subject_id TEXT,
-  is_server BOOLEAN NOT NULL
+CREATE TABLE IF NOT EXISTS ws_token (
+    token       VARBINARY(32) NOT NULL PRIMARY KEY,
+    player_id   INTEGER(10) UNSIGNED DEFAULT NULL,
+    subject_id  VARBINARY(32) NOT NULL,
+    is_server   BOOLEAN NOT NULL,
+    expires_at  DATETIME(6) NOT NULL
 );
+CREATE INDEX idx_ws_token_server_exp ON ws_token (is_server, expires_at);
 ```
 
 * `player_id` is used for player tokens

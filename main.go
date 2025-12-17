@@ -37,12 +37,18 @@ var (
 	pongWait   = 60 * time.Second
 	pingPeriod = 30 * time.Second
 
-	offlineTTL                 = 10 * time.Second // how long to hold offline messages
+	offlineTTL                 time.Duration
 	maxQueuedMessagesPerPlayer int
 	maxConnectionsPerPlayer    int
 	rateLimit                  int
 	ratePeriod                 time.Duration
+	tokenRevalidationPeriod    time.Duration
 )
+
+type wsConnection struct {
+	conn  *websocket.Conn
+	token string
+}
 
 // ///////////////////
 // GLOBALS
@@ -64,8 +70,11 @@ var (
 		},
 	}
 
-	mu      sync.Mutex
-	players = make(map[string]map[*websocket.Conn]bool)
+	mu sync.Mutex
+
+	// Map of playerID -> connections
+	// Each connection stores the websocket.Conn and its token
+	players = make(map[string]map[*websocket.Conn]*wsConnection)
 
 	// Offline messages
 	pendingMu       sync.Mutex
@@ -176,6 +185,7 @@ func initDB() error {
 	return db.Ping()
 }
 
+// validateToken checks token validity in DB
 func validateToken(token string, isServer bool) (string, bool) {
 	const q = `
 		SELECT IFNULL(player_id, subject_id)
@@ -199,17 +209,45 @@ func validateToken(token string, isServer bool) (string, bool) {
 // ///////////////////
 // CONNECTION MANAGEMENT
 // ///////////////////
-func registerConnection(playerID string, c *websocket.Conn) {
+
+// registerConnection registers a WS connection and stores its token
+func registerConnection(playerID string, c *websocket.Conn, token string) {
 	mu.Lock()
 	if players[playerID] == nil {
-		players[playerID] = make(map[*websocket.Conn]bool)
+		players[playerID] = make(map[*websocket.Conn]*wsConnection)
 	}
-	players[playerID][c] = true
+	players[playerID][c] = &wsConnection{conn: c, token: token}
 	mu.Unlock()
 
 	connections.Inc()
 
-	// Flush pending messages
+	flushPendingMessages(playerID, c)
+}
+
+// unregisterConnection removes a WS connection
+func unregisterConnection(playerID string, c *websocket.Conn) {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(players[playerID], c)
+	if len(players[playerID]) == 0 {
+		delete(players, playerID)
+	}
+	connections.Dec()
+}
+
+// closeAllConnections closes all WS connections (on shutdown)
+func closeAllConnections() {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, conns := range players {
+		for _, wc := range conns {
+			wc.conn.Close()
+		}
+	}
+}
+
+// flushPendingMessages sends queued messages to a newly connected player
+func flushPendingMessages(playerID string, c *websocket.Conn) {
 	pendingMu.Lock()
 	msgs := pendingMessages[playerID]
 	if len(msgs) > 0 {
@@ -223,7 +261,7 @@ func registerConnection(playerID string, c *websocket.Conn) {
 					"queued_at": pm.timestamp,
 					"age_ms":    time.Since(pm.timestamp).Milliseconds(),
 					"source":    "offline_queue",
-				}).Info("Delivered queued message")
+				}).Info("Delivered queued WS message")
 			}
 		}
 		delete(pendingMessages, playerID)
@@ -231,28 +269,8 @@ func registerConnection(playerID string, c *websocket.Conn) {
 	pendingMu.Unlock()
 }
 
-func unregisterConnection(playerID string, c *websocket.Conn) {
-	mu.Lock()
-	defer mu.Unlock()
-	delete(players[playerID], c)
-	if len(players[playerID]) == 0 {
-		delete(players, playerID)
-	}
-	connections.Dec()
-}
-
-func closeAllConnections() {
-	mu.Lock()
-	defer mu.Unlock()
-	for _, conns := range players {
-		for c := range conns {
-			c.Close()
-		}
-	}
-}
-
 // ///////////////////
-// WS HANDLER
+// WEBSOCKET HANDLER
 // ///////////////////
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
@@ -267,7 +285,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check connection limit
+	// check connection limit
 	mu.Lock()
 	current := len(players[playerID])
 	mu.Unlock()
@@ -276,19 +294,19 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			"player_id": playerID,
 			"current":   current,
 			"limit":     maxConnectionsPerPlayer,
-		}).Warn("Connection rejected: player has too many concurrent connections")
+		}).Warn("Connection rejected: too many connections")
 		http.Error(w, "too many connections", http.StatusTooManyRequests)
 		return
 	}
 
-	// Upgrade to WebSocket
+	// upgrade to WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 
-	// Register connection
-	registerConnection(playerID, conn)
+	// register connection with token
+	registerConnection(playerID, conn, token)
 	defer unregisterConnection(playerID, conn)
 
 	logrus.WithFields(logrus.Fields{
@@ -297,29 +315,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		"ip":        r.RemoteAddr,
 	}).Info("Player connected")
 
-	// Flush pending messages (offline queue)
-	pendingMu.Lock()
-	msgs := pendingMessages[playerID]
-	if len(msgs) > 0 {
-		for _, pm := range msgs {
-			if time.Since(pm.timestamp) <= offlineTTL {
-				_ = conn.WriteJSON(pm.msg)
-				messagesDelivered.Inc()
-
-				logrus.WithFields(logrus.Fields{
-					"player_id": playerID,
-					"event":     pm.msg.Event,
-					"queued_at": pm.timestamp,
-					"age_ms":    time.Since(pm.timestamp).Milliseconds(),
-					"source":    "offline_queue",
-				}).Info("Delivered queued WS message")
-			}
-		}
-		delete(pendingMessages, playerID)
-	}
-	pendingMu.Unlock()
-
-	// Heartbeat (ping/pong)
+	// heartbeat
 	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -334,7 +330,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Main read loop
+	// main read loop
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			break
@@ -391,7 +387,6 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		pendingMu.Lock()
 		queue := pendingMessages[msg.PlayerID]
 		if len(queue) >= maxQueuedMessagesPerPlayer {
-			// Drop oldest
 			queue = queue[1:]
 			logrus.WithFields(logrus.Fields{
 				"player_id": msg.PlayerID,
@@ -402,8 +397,8 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		pendingMessages[msg.PlayerID] = append(queue, pendingMessage{msg: wsMsg, timestamp: time.Now()})
 		pendingMu.Unlock()
 	} else {
-		for c := range conns {
-			_ = c.WriteJSON(wsMsg)
+		for _, wc := range conns {
+			_ = wc.conn.WriteJSON(wsMsg)
 			messagesDelivered.Inc()
 		}
 		logrus.WithFields(logrus.Fields{
@@ -412,7 +407,6 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 			"event":       msg.Event,
 			"connections": numConns,
 		}).Info("Message delivered to player")
-
 	}
 	mu.Unlock()
 
@@ -454,14 +448,14 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 	defer mu.Unlock()
 
 	if req.PlayerID != nil {
-		for c := range players[*req.PlayerID] {
-			_ = c.WriteJSON(wsMsg)
+		for _, wc := range players[*req.PlayerID] {
+			_ = wc.conn.WriteJSON(wsMsg)
 			messagesDelivered.Inc()
 		}
 	} else {
 		for _, conns := range players {
-			for c := range conns {
-				_ = c.WriteJSON(wsMsg)
+			for _, wc := range conns {
+				_ = wc.conn.WriteJSON(wsMsg)
 				messagesDelivered.Inc()
 			}
 		}
@@ -479,6 +473,35 @@ func initMetrics() {
 }
 
 // ///////////////////
+// TOKEN REVALIDATION
+// ///////////////////
+
+// startTokenRevalidation periodically checks all WS tokens and closes invalid ones
+func startTokenRevalidation(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	go func() {
+		for range ticker.C {
+			mu.Lock()
+			for playerID, conns := range players {
+				for c, wc := range conns {
+					_, valid := validateToken(wc.token, false)
+					if !valid {
+						logrus.WithFields(logrus.Fields{
+							"player_id": playerID,
+						}).Info("Token invalid, closing connection")
+						_ = wc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token expired"))
+						_ = wc.conn.Close()
+						delete(conns, c)
+						connections.Dec()
+					}
+				}
+			}
+			mu.Unlock()
+		}
+	}()
+}
+
+// ///////////////////
 // MAIN
 // ///////////////////
 func main() {
@@ -492,7 +515,8 @@ func main() {
 	flag.IntVar(&rateLimit, "rate-limit", 10, "Number of messages allowed per rate-period per server token")
 	flag.DurationVar(&ratePeriod, "rate-period", time.Second, "Duration for rate limiting (e.g., 1s, 500ms)")
 	flag.IntVar(&maxConnectionsPerPlayer, "max-conns", 5, "Maximum concurrent WebSocket connections per player")
-
+	flag.DurationVar(&tokenRevalidationPeriod, "revalidate-period", time.Minute, "Period for WS token revalidation (e.g., 30s, 1m)")
+	flag.DurationVar(&offlineTTL, "offline-ttl", 10*time.Second, "Duration that messages will be stored offline (e.g., 30s, 1m)")
 	flag.Parse()
 
 	if origins != "" {
@@ -509,7 +533,7 @@ func main() {
 
 	initMetrics()
 
-	// Cleanup expired offline messages
+	// cleanup expired offline messages
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for range ticker.C {
@@ -532,6 +556,9 @@ func main() {
 		}
 	}()
 
+	// start WS token revalidation
+	startTokenRevalidation(tokenRevalidationPeriod)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wsHandler)
 	mux.HandleFunc("/publish", publishHandler)
@@ -540,6 +567,7 @@ func main() {
 
 	server := &http.Server{Addr: serverAddr, Handler: mux}
 
+	// graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

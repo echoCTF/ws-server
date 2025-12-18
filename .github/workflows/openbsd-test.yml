@@ -25,6 +25,8 @@ jobs:
         run: |
           cd /home/runner/work/ws-server/ws-server
           go build
+          du -sh ws-server
+          ./ws-server -help
           
 
 

@@ -10,7 +10,7 @@ concurrency:
 on: [push]
 
 jobs:
-  test:
+  openbsd-build:
     permissions:
       contents: read
       pull-requests: read

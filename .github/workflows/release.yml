@@ -2,6 +2,7 @@ name: Build and Release WS Server (release.yml)
 permissions:
   contents: write
   pull-requests: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -65,10 +66,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
           path: ./binaries
+
       - name: Display structure of downloaded files
         run: file ./binaries/*/*
 
@@ -77,6 +80,7 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.version }}
           name: "WS Server ${{ github.event.inputs.version }}"
+          #body_path: ${{ github.workspace }}-CHANGELOG.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -87,6 +91,7 @@ jobs:
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   docker:
     permissions:
       contents: read

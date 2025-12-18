@@ -3,6 +3,10 @@ name: OpenBSD Test
 permissions:
   contents: read
   pull-requests: read
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+  
 on: [push]
 
 jobs:
@@ -16,17 +20,9 @@ jobs:
       with:
         usesh: true
         prepare: |
-          pkg_add curl golang
+          pkg_add curl go
 
         run: |
-          tree /home/runner/work
-          pwd
-          ls -lah
-          whoami
-          env
-          sysctl hw.model
-          sysctl hw.ncpu
-          sysctl hw.physmem
           cd /home/runner/work/ws-server/ws-server
           go build
           

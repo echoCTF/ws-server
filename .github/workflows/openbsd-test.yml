@@ -27,7 +27,8 @@ jobs:
           sysctl hw.model
           sysctl hw.ncpu
           sysctl hw.physmem
-          sysctl hw.usermem
+          cd /home/runner/work/ws-server/ws-server
+          go build
           
 
 

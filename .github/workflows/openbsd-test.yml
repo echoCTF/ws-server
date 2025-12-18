@@ -1,0 +1,32 @@
+
+name: Test
+
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Test in OpenBSD
+      id: test
+      uses: vmactions/openbsd-vm@v1.2.5
+      with:
+        usesh: true
+        prepare: |
+          pkg_add curl
+
+        run: |
+          tree /home/runner/work
+          pwd
+          ls -lah
+          whoami
+          env
+          sysctl hw.model
+          sysctl hw.ncpu
+          sysctl hw.physmem
+          sysctl hw.usermem
+          
+
+
+

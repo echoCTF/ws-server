@@ -16,7 +16,7 @@ jobs:
       with:
         usesh: true
         prepare: |
-          pkg_add curl
+          pkg_add curl golang
 
         run: |
           tree /home/runner/work

@@ -5,7 +5,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
+  group: pr-openbsd-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 on: [push]

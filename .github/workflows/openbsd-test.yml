@@ -2,7 +2,7 @@
 name: OpenBSD Test
 permissions:
   contents: read
-  pull-requests:
+  pull-requests: read
 on: [push]
 
 jobs:

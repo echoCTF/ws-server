@@ -1,0 +1,36 @@
+
+name: OpenBSD Test
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+  
+on: [push]
+
+jobs:
+  openbsd-build:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Test in OpenBSD
+      id: test
+      uses: vmactions/openbsd-vm@v1.2.5
+      with:
+        usesh: true
+        prepare: |
+          pkg_add curl go
+
+        run: |
+          cd /home/runner/work/ws-server/ws-server
+          go build
+          du -sh ws-server
+          ./ws-server -help
+          
+
+
+

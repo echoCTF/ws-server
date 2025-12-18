@@ -1,5 +1,5 @@
 
-name: OpenBSD Test
+name: OpenBSD Test (openbsd-test.yml)
 permissions:
   contents: read
   pull-requests: read

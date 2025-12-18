@@ -11,6 +11,9 @@ on: [push]
 
 jobs:
   test:
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6

@@ -43,6 +43,7 @@ var (
 	rateLimit                  int
 	ratePeriod                 time.Duration
 	tokenRevalidationPeriod    time.Duration
+	logFile                    string
 	logLevel                   string
 )
 
@@ -512,6 +513,7 @@ func main() {
 	flag.StringVar(&dbDSN, "dsn", "file:ws_tokens.db?cache=shared", "Database DSN")
 	flag.StringVar(&serverAddr, "addr", ":8080", "Server address")
 	flag.StringVar(&origins, "origins", "", "Allowed WS origins")
+	flag.StringVar(&logFile, "log-file", "", "Path to log file (default: stdout)")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level (panic, fatal, error, warn, info, debug, trace)")
 	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "Maximum queued messages per player")
 	flag.IntVar(&rateLimit, "rate-limit", 10, "Number of messages allowed per rate-period per server token")
@@ -526,7 +528,16 @@ func main() {
 	}
 
 	logrus.SetFormatter(&logrus.JSONFormatter{})
-	logrus.SetOutput(os.Stdout)
+
+	if logFile != "" {
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Fatalf("failed to open log file %s: %v", logFile, err)
+		}
+		logrus.SetOutput(f)
+	} else {
+		logrus.SetOutput(os.Stdout)
+	}
 
 	level, err := logrus.ParseLevel(strings.ToLower(logLevel))
 	if err != nil {

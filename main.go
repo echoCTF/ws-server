@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -45,6 +46,7 @@ var (
 	tokenRevalidationPeriod    time.Duration
 	logFile                    string
 	logLevel                   string
+	daemonize                  bool
 )
 
 type wsConnection struct {
@@ -503,6 +505,34 @@ func startTokenRevalidation(interval time.Duration) {
 	}()
 }
 
+func daemonizeSelf() {
+	if os.Getenv("DAEMONIZED") == "1" {
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		log.Fatalf("cannot get executable: %v", err)
+	}
+
+	args := []string{}
+	for _, a := range os.Args[1:] {
+		if a != "-daemon" {
+			args = append(args, a)
+		}
+	}
+
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), "DAEMONIZED=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("failed to daemonize: %v", err)
+	}
+
+	os.Exit(0)
+}
+
 // ///////////////////
 // MAIN
 // ///////////////////
@@ -521,6 +551,7 @@ func main() {
 	flag.IntVar(&maxConnectionsPerPlayer, "max-conns", 5, "Maximum concurrent WebSocket connections per player")
 	flag.DurationVar(&tokenRevalidationPeriod, "revalidate-period", time.Minute, "Period for WS token revalidation (e.g., 30s, 1m)")
 	flag.DurationVar(&offlineTTL, "offline-ttl", 10*time.Second, "Duration that messages will be stored offline (e.g., 30s, 1m)")
+	flag.BoolVar(&daemonize, "daemon", false, "Run as daemon (background process)")
 	flag.Parse()
 
 	if origins != "" {
@@ -544,6 +575,10 @@ func main() {
 		log.Fatalf("invalid log level: %s", logLevel)
 	}
 	logrus.SetLevel(level)
+
+	if daemonize {
+		daemonizeSelf()
+	}
 
 	if err := initDB(); err != nil {
 		log.Fatal(err)

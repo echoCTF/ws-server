@@ -47,6 +47,7 @@ var (
 	logFile                    string
 	logLevel                   string
 	daemonize                  bool
+	pidFile                    string
 )
 
 type wsConnection struct {
@@ -505,6 +506,28 @@ func startTokenRevalidation(interval time.Duration) {
 	}()
 }
 
+func writePIDFile(path string) error {
+	pid := os.Getpid()
+	data := []byte(fmt.Sprintf("%d\n", pid))
+	return os.WriteFile(path, data, 0644)
+}
+
+func removePIDFile(path string) {
+	_ = os.Remove(path)
+}
+
+func pidFileExists(path string) (int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
+		return 0, false
+	}
+	return pid, true
+}
+
 func daemonizeSelf() {
 	if os.Getenv("DAEMONIZED") == "1" {
 		return
@@ -545,6 +568,7 @@ func main() {
 	flag.StringVar(&origins, "origins", "", "Allowed WS origins")
 	flag.StringVar(&logFile, "log-file", "", "Path to log file (default: stdout)")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level (panic, fatal, error, warn, info, debug, trace)")
+	flag.StringVar(&pidFile, "pid-file", "", "Path to PID file (daemon mode only)")
 	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "Maximum queued messages per player")
 	flag.IntVar(&rateLimit, "rate-limit", 10, "Number of messages allowed per rate-period per server token")
 	flag.DurationVar(&ratePeriod, "rate-period", time.Second, "Duration for rate limiting (e.g., 1s, 500ms)")
@@ -576,8 +600,27 @@ func main() {
 	}
 	logrus.SetLevel(level)
 
+	if pidFile != "" {
+		if pid, ok := pidFileExists(pidFile); ok {
+			log.Fatalf("pid file already exists for PID: %d", pid)
+		}
+	}
+
 	if daemonize {
 		daemonizeSelf()
+	}
+
+	if pidFile != "" {
+		if err := writePIDFile(pidFile); err != nil {
+			logrus.Fatalf("failed to write pid file: %v", err)
+		}
+		defer removePIDFile(pidFile)
+	}
+
+	if pidFile != "" {
+		if err := writePIDFile(pidFile); err != nil {
+			logrus.Fatalf("failed to write pid file: %v", err)
+		}
 	}
 
 	if err := initDB(); err != nil {
@@ -633,5 +676,8 @@ func main() {
 	}()
 
 	logrus.Infof("Server listening on %s", serverAddr)
-	log.Fatal(server.ListenAndServe())
+	err = server.ListenAndServe()
+	if err != nil && err != http.ErrServerClosed {
+		logrus.Fatalf("server error: %v", err)
+	}
 }

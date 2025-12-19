@@ -43,6 +43,7 @@ var (
 	rateLimit                  int
 	ratePeriod                 time.Duration
 	tokenRevalidationPeriod    time.Duration
+	logLevel                   string
 )
 
 type wsConnection struct {
@@ -511,6 +512,7 @@ func main() {
 	flag.StringVar(&dbDSN, "dsn", "file:ws_tokens.db?cache=shared", "Database DSN")
 	flag.StringVar(&serverAddr, "addr", ":8080", "Server address")
 	flag.StringVar(&origins, "origins", "", "Allowed WS origins")
+	flag.StringVar(&logLevel, "log-level", "info", "Log level (panic, fatal, error, warn, info, debug, trace)")
 	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "Maximum queued messages per player")
 	flag.IntVar(&rateLimit, "rate-limit", 10, "Number of messages allowed per rate-period per server token")
 	flag.DurationVar(&ratePeriod, "rate-period", time.Second, "Duration for rate limiting (e.g., 1s, 500ms)")
@@ -525,7 +527,12 @@ func main() {
 
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 	logrus.SetOutput(os.Stdout)
-	logrus.SetLevel(logrus.InfoLevel)
+
+	level, err := logrus.ParseLevel(strings.ToLower(logLevel))
+	if err != nil {
+		log.Fatalf("invalid log level: %s", logLevel)
+	}
+	logrus.SetLevel(level)
 
 	if err := initDB(); err != nil {
 		log.Fatal(err)

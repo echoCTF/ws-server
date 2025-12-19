@@ -1,0 +1,12 @@
+; wsserver.unit
+[Unit]
+Description=WS Server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/ws-server -log-file /var/log/ws.log
+Restart=always
+User=ws
+
+[Install]
+WantedBy=multi-user.target

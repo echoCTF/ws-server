@@ -1,0 +1,22 @@
+#!/bin/ksh
+# useradd -s /sbin/nologin -d /var/empty _ws
+# mkdir -p /var/ws
+# chown _ws:_ws /var/ws
+# touch /var/log/ws-server.log
+# chown _ws:_ws /var/log/ws-server.log
+#
+# login.conf
+# wsserver:\
+# 	:openfiles-cur=4096:\
+# 	:openfiles-max=8192:\
+# 	:maxproc-cur=256:\
+# 	:maxproc-max=512:\
+# 	:tc=daemon:
+
+
+rc_reload=NO
+
+daemon="/usr/local/bin/ws-server"
+# uncomment if dedicated user exists
+# daemon_user="_ws"
+. /etc/rc.d/rc.subr

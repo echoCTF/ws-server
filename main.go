@@ -610,6 +610,10 @@ func main() {
 		daemonizeSelf()
 	}
 
+	if err := initDB(); err != nil {
+		log.Fatal(err)
+	}
+
 	if pidFile != "" {
 		if err := writePIDFile(pidFile); err != nil {
 			logrus.Fatalf("failed to write pid file: %v", err)
@@ -621,10 +625,6 @@ func main() {
 		if err := writePIDFile(pidFile); err != nil {
 			logrus.Fatalf("failed to write pid file: %v", err)
 		}
-	}
-
-	if err := initDB(); err != nil {
-		log.Fatal(err)
 	}
 
 	initMetrics()

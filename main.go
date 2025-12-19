@@ -112,6 +112,30 @@ type limiter struct {
 	last   time.Time
 }
 
+func parseFlags() {
+	var origins string
+
+	flag.StringVar(&dbDriver, "db", "sqlite", "Database driver")
+	flag.StringVar(&dbDSN, "dsn", "file:ws_tokens.db?cache=shared", "Database DSN")
+	flag.StringVar(&serverAddr, "addr", ":8080", "Server address")
+	flag.StringVar(&origins, "origins", "", "Allowed WS origins")
+	flag.StringVar(&logFile, "log-file", "", "Path to log file")
+	flag.StringVar(&logLevel, "log-level", "info", "Log level")
+	flag.StringVar(&pidFile, "pid-file", "", "Path to PID file")
+	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "")
+	flag.IntVar(&rateLimit, "rate-limit", 10, "")
+	flag.DurationVar(&ratePeriod, "rate-period", time.Second, "")
+	flag.IntVar(&maxConnectionsPerPlayer, "max-conns", 5, "")
+	flag.DurationVar(&tokenRevalidationPeriod, "revalidate-period", time.Minute, "")
+	flag.DurationVar(&offlineTTL, "offline-ttl", 10*time.Second, "")
+	flag.BoolVar(&daemonize, "daemon", false, "")
+	flag.Parse()
+
+	if origins != "" {
+		allowedOrigins = strings.Split(origins, ",")
+	}
+}
+
 func allow(key string, rate int, per time.Duration) bool {
 	lm.Lock()
 	defer lm.Unlock()
@@ -560,27 +584,7 @@ func daemonizeSelf() {
 // MAIN
 // ///////////////////
 func main() {
-	var origins string
-
-	flag.StringVar(&dbDriver, "db", "sqlite", "Database driver")
-	flag.StringVar(&dbDSN, "dsn", "file:ws_tokens.db?cache=shared", "Database DSN")
-	flag.StringVar(&serverAddr, "addr", ":8080", "Server address")
-	flag.StringVar(&origins, "origins", "", "Allowed WS origins")
-	flag.StringVar(&logFile, "log-file", "", "Path to log file (default: stdout)")
-	flag.StringVar(&logLevel, "log-level", "info", "Log level (panic, fatal, error, warn, info, debug, trace)")
-	flag.StringVar(&pidFile, "pid-file", "", "Path to PID file (daemon mode only)")
-	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "Maximum queued messages per player")
-	flag.IntVar(&rateLimit, "rate-limit", 10, "Number of messages allowed per rate-period per server token")
-	flag.DurationVar(&ratePeriod, "rate-period", time.Second, "Duration for rate limiting (e.g., 1s, 500ms)")
-	flag.IntVar(&maxConnectionsPerPlayer, "max-conns", 5, "Maximum concurrent WebSocket connections per player")
-	flag.DurationVar(&tokenRevalidationPeriod, "revalidate-period", time.Minute, "Period for WS token revalidation (e.g., 30s, 1m)")
-	flag.DurationVar(&offlineTTL, "offline-ttl", 10*time.Second, "Duration that messages will be stored offline (e.g., 30s, 1m)")
-	flag.BoolVar(&daemonize, "daemon", false, "Run as daemon (background process)")
-	flag.Parse()
-
-	if origins != "" {
-		allowedOrigins = strings.Split(origins, ",")
-	}
+	parseFlags()
 
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 

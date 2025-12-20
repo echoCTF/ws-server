@@ -579,13 +579,7 @@ func daemonizeSelf() {
 
 	os.Exit(0)
 }
-
-// ///////////////////
-// MAIN
-// ///////////////////
-func main() {
-	parseFlags()
-
+func setupLogging() {
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 
 	if logFile != "" {
@@ -603,6 +597,14 @@ func main() {
 		log.Fatalf("invalid log level: %s", logLevel)
 	}
 	logrus.SetLevel(level)
+}
+
+// ///////////////////
+// MAIN
+// ///////////////////
+func main() {
+	parseFlags()
+	setupLogging()
 
 	if pidFile != "" {
 		if pid, ok := pidFileExists(pidFile); ok {
@@ -680,7 +682,7 @@ func main() {
 	}()
 
 	logrus.Infof("Server listening on %s", serverAddr)
-	err = server.ListenAndServe()
+	err := server.ListenAndServe()
 	if err != nil && err != http.ErrServerClosed {
 		logrus.Fatalf("server error: %v", err)
 	}

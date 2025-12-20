@@ -599,18 +599,32 @@ func setupLogging() {
 	logrus.SetLevel(level)
 }
 
+func handlePIDFile() {
+	if pidFile == "" {
+		return
+	}
+
+	if pid, ok := pidFileExists(pidFile); ok {
+		log.Fatalf("pid file already exists for PID: %d", pid)
+	}
+
+	if err := writePIDFile(pidFile); err != nil {
+		logrus.Fatalf("failed to write pid file: %v", err)
+	}
+
+	go func() {
+		<-context.Background().Done()
+		removePIDFile(pidFile)
+	}()
+}
+
 // ///////////////////
 // MAIN
 // ///////////////////
 func main() {
 	parseFlags()
 	setupLogging()
-
-	if pidFile != "" {
-		if pid, ok := pidFileExists(pidFile); ok {
-			log.Fatalf("pid file already exists for PID: %d", pid)
-		}
-	}
+	handlePIDFile()
 
 	if daemonize {
 		daemonizeSelf()
@@ -618,19 +632,6 @@ func main() {
 
 	if err := initDB(); err != nil {
 		log.Fatal(err)
-	}
-
-	if pidFile != "" {
-		if err := writePIDFile(pidFile); err != nil {
-			logrus.Fatalf("failed to write pid file: %v", err)
-		}
-		defer removePIDFile(pidFile)
-	}
-
-	if pidFile != "" {
-		if err := writePIDFile(pidFile); err != nil {
-			logrus.Fatalf("failed to write pid file: %v", err)
-		}
 	}
 
 	initMetrics()

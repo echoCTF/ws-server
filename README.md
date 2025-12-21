@@ -1,5 +1,11 @@
 # WebSocket Message Gateway
 
+[![CodeQL](https://github.com/echoCTF/ws-server/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/echoCTF/ws-server/actions/workflows/github-code-scanning/codeql)
+[![Dependabot Updates](https://github.com/echoCTF/ws-server/actions/workflows/dependabot/dependabot-updates/badge.svg)](https://github.com/echoCTF/ws-server/actions/workflows/dependabot/dependabot-updates)
+[![Dependency Graph](https://github.com/echoCTF/ws-server/actions/workflows/dependabot/update-graph/badge.svg)](https://github.com/echoCTF/ws-server/actions/workflows/dependabot/update-graph)
+[![Go Format Check (format.yml)](https://github.com/echoCTF/ws-server/actions/workflows/format.yml/badge.svg)](https://github.com/echoCTF/ws-server/actions/workflows/format.yml)
+[![Lint Go Code (lint.yml)](https://github.com/echoCTF/ws-server/actions/workflows/lint.yml/badge.svg)](https://github.com/echoCTF/ws-server/actions/workflows/lint.yml)
+
 A lightweight WebSocket gateway for delivering real-time messages to players, with server-side publishing, offline queueing, rate limiting, and Prometheus metrics.
 
 ## Features

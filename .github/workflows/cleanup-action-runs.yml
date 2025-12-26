@@ -13,9 +13,7 @@ jobs:
     steps:
       - uses: actions/github-script@v7
         with:
-          script: |
-            const core = require('@actions/core')
-            
+          script: |           
             const KEEP_RUNS = 10
             const KEEP_ARTIFACTS = 10
 

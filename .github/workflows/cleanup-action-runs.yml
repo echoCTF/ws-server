@@ -16,6 +16,7 @@ jobs:
           script: |           
             const KEEP_RUNS = 10
             const KEEP_ARTIFACTS = 10
+            const KEEP_CACHES = 10
 
             core.info('Fetching workflow runs...')
             const runs = await github.paginate(
@@ -50,7 +51,24 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 artifact_id: artifact.id,
-              })
+              })              
             }
 
-            core.info('Cleanup complete')
+            core.info('Fetching caches...')
+            const caches = await github.paginate(
+              github.rest.actions.getActionsCacheList,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 }
+            )
+            
+            core.info(`Total caches: ${caches.length}`)
+            core.info(`Keeping newest ${KEEP_CACHES}, deleting ${Math.max(caches.length - KEEP_CACHES, 0)}`)
+            
+            for (const [i, cache] of caches.slice(KEEP_CACHES).entries()) {
+              core.info(`Deleting cache ${i + 1}/${caches.length - KEEP_CACHES} (id=${cache.id})`)
+              await github.rest.actions.deleteActionsCacheById({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                cache_id: cache.id,
+              })
+            }
+                        core.info('Cleanup complete')

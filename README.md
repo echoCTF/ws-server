@@ -75,16 +75,20 @@ A lightweight WebSocket gateway for delivering real-time messages to players, wi
 
 ## Configuration (Flags)
 
-* `-addr` – HTTP server address (default `:8080`)
-* `-db` – Database driver (`sqlite` or `mysql`)
-* `-dsn` – Database DSN
+* `-addr` – Server address (default `:8080`)
+* `-db` – Database driver (default `sqlite`)
+* `-dsn` – Database DSN (default `file:ws_tokens.db?cache=shared`)
 * `-origins` – Comma-separated allowed WS origins
-* `-max-conns` – Max WS connections per player
-* `-max-queued` – Max offline queued messages per player
-* `-offline-ttl` – Offline message TTL
-* `-rate-limit` – Messages per rate period per server token
-* `-rate-period` – Rate limit window
-* `-revalidate-period` – Token revalidation interval
+* `-log-file` – Path to log file
+* `-log-level` – Log level (default `info`)
+* `-pid-file` – Path to PID file
+* `-max-conns` – Max WS connections per player (default `5`)
+* `-max-queued` – Max offline queued messages per player (default `100`)
+* `-offline-ttl` – Offline message TTL (default `10s`)
+* `-rate-limit` – Messages per rate period per server token (default `10`)
+* `-rate-period` – Rate limit window (default `1s`)
+* `-revalidate-period` – Token revalidation interval (default `1m`)
+* `-daemon` – Run process as a daemon
 
 ## Database
 
@@ -118,6 +122,7 @@ go build
   -db sqlite \
   -dsn file:ws_tokens.db?cache=shared
 
+# or
 ./ws-gateway \
   -db mysql \
   -dsn "root@/echoCTF"

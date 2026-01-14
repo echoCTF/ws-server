@@ -11,9 +11,8 @@ jobs:
       - name: Assign PR to repo owner
         uses: actions/github-script@v8
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GH_ADMIN_TOKEN }}
           script: |
-            const owner = context.repo.owner;
             await github.rest.issues.addAssignees({
               owner: context.repo.owner,
               repo: context.repo.repo,

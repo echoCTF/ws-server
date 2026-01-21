@@ -6,7 +6,7 @@ on:
 
 permissions:
   issues: write
-  
+
 jobs:
   assign:
     runs-on: ubuntu-latest

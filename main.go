@@ -512,6 +512,77 @@ func initMetrics() {
 	prometheus.MustRegister(connections, messagesPublished, messagesDelivered)
 }
 
+// startOfflineMessageCleanup periodically removes expired pending messages from the offline queue.
+// It stops when stopCh is closed.
+func startOfflineMessageCleanup(stopCh <-chan struct{}) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		// FIX 8: Stop the cleanup ticker on shutdown so the goroutine can exit cleanly.
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				now := time.Now()
+				pendingMu.Lock()
+				for pid, msgs := range pendingMessages {
+					filtered := msgs[:0]
+					for _, pm := range msgs {
+						if now.Sub(pm.timestamp) <= offlineTTL {
+							filtered = append(filtered, pm)
+						}
+					}
+					if len(filtered) == 0 {
+						delete(pendingMessages, pid)
+					} else {
+						pendingMessages[pid] = filtered
+					}
+				}
+				pendingMu.Unlock()
+			}
+		}
+	}()
+}
+
+// buildServer constructs and returns the HTTP server and its ServeMux with all routes registered.
+func buildServer() *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", wsHandler)
+	mux.HandleFunc("/publish", publishHandler)
+	mux.HandleFunc("/broadcast", broadcastHandler)
+	mux.Handle("/metrics", promhttp.Handler())
+
+	return &http.Server{Addr: serverAddr, Handler: mux}
+}
+
+// runServer starts the HTTP server and blocks until it shuts down.
+// It listens for SIGINT/SIGTERM, closes stopCh to signal background goroutines,
+// then performs a graceful HTTP shutdown followed by closing all websocket connections.
+// Returns an error if the server exits unexpectedly.
+func runServer(server *http.Server, stopCh chan struct{}) error {
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-quit
+		logrus.Info("Shutting down server...")
+		// Signal all background goroutines (cleanup, revalidation) to stop.
+		close(stopCh)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+		closeAllConnections()
+	}()
+
+	logrus.Infof("Server listening on %s", serverAddr)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("server error: %w", err)
+	}
+	return nil
+}
+
 // startTokenRevalidation periodically validates all active websocket tokens.
 // Invalid tokens cause connections to be closed and removed.
 // The provided stopCh can be closed to stop the revalidation loop and its ticker.
@@ -703,65 +774,8 @@ func run() error {
 	// stopCh is closed on shutdown to signal background goroutines to exit.
 	stopCh := make(chan struct{})
 
-	// Start offline message cleanup
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				now := time.Now()
-				pendingMu.Lock()
-				for pid, msgs := range pendingMessages {
-					filtered := msgs[:0]
-					for _, pm := range msgs {
-						if now.Sub(pm.timestamp) <= offlineTTL {
-							filtered = append(filtered, pm)
-						}
-					}
-					if len(filtered) == 0 {
-						delete(pendingMessages, pid)
-					} else {
-						pendingMessages[pid] = filtered
-					}
-				}
-				pendingMu.Unlock()
-			}
-		}
-	}()
-
-	// start WS token revalidation
+	startOfflineMessageCleanup(stopCh)
 	startTokenRevalidation(tokenRevalidationPeriod, stopCh)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", wsHandler)
-	mux.HandleFunc("/publish", publishHandler)
-	mux.HandleFunc("/broadcast", broadcastHandler)
-	mux.Handle("/metrics", promhttp.Handler())
-
-	server := &http.Server{Addr: serverAddr, Handler: mux}
-
-	// Graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-quit
-		logrus.Info("Shutting down server...")
-		// Signal all background goroutines (cleanup, revalidation) to stop.
-		close(stopCh)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(ctx)
-		closeAllConnections()
-	}()
-
-	logrus.Infof("Server listening on %s", serverAddr)
-	err := server.ListenAndServe()
-	if err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("server error: %w", err)
-	}
-
-	return nil
+	return runServer(buildServer(), stopCh)
 }

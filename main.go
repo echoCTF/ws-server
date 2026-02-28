@@ -517,7 +517,6 @@ func initMetrics() {
 func startOfflineMessageCleanup(stopCh <-chan struct{}) {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
-		// FIX 8: Stop the cleanup ticker on shutdown so the goroutine can exit cleanly.
 		defer ticker.Stop()
 
 		for {

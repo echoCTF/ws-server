@@ -40,7 +40,7 @@ A lightweight WebSocket gateway for delivering real-time messages to players, wi
 
 ```json
 {
-  "player_id": "player123",
+  "player_id": "1",
   "event": "event_name",
   "payload": { "any": "json" }
 }
@@ -63,7 +63,7 @@ A lightweight WebSocket gateway for delivering real-time messages to players, wi
 
 ```json
 {
-  "player_id": "player123",
+  "player_id": "1",
   "event": "event_name",
   "payload": { "any": "json" }
 }
@@ -82,10 +82,10 @@ A lightweight WebSocket gateway for delivering real-time messages to players, wi
 * `-log-file` – Path to log file
 * `-log-level` – Log level (default `info`)
 * `-pid-file` – Path to PID file
-* `-max-conns` – Max WS connections per player (default `5`)
+* `-max-conns` – Max WS connections per player (default `10`)
 * `-max-queued` – Max offline queued messages per player (default `100`)
 * `-offline-ttl` – Offline message TTL (default `10s`)
-* `-rate-limit` – Messages per rate period per server token (default `10`)
+* `-rate-limit` – Messages per rate period per server token (default `200`)
 * `-rate-period` – Rate limit window (default `1s`)
 * `-revalidate-period` – Token revalidation interval (default `1m`)
 * `-daemon` – Run process as a daemon
@@ -118,12 +118,12 @@ CREATE INDEX idx_ws_token_server_exp ON ws_token (is_server, expires_at);
 
 ```bash
 go build
-./ws-gateway \
+./ws-server \
   -db sqlite \
   -dsn file:ws_tokens.db?cache=shared
 
 # or
-./ws-gateway \
+./ws-server \
   -db mysql \
   -dsn "root@/echoCTF"
 ```

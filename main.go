@@ -306,14 +306,25 @@ func flushPendingMessages(playerID string, c *websocket.Conn) {
 // Connections are automatically unregistered on disconnect.
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
+
+	// Upgrade first, authenticate after. A rejected pre-handshake status
+	// is invisible to the browser's WebSocket API, so auth failure has
+	// to be signaled as a real close frame instead.
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+
 	if token == "" {
-		http.Error(w, "missing token", http.StatusUnauthorized)
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "missing token"))
+		_ = conn.Close()
 		return
 	}
 
 	playerID, ok := validateToken(token, false)
 	if !ok {
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid token"))
+		_ = conn.Close()
 		return
 	}
 
@@ -327,16 +338,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			"current":   current,
 			"limit":     maxConnectionsPerPlayer,
 		}).Warn("Connection rejected: too many connections")
-		http.Error(w, "too many connections", http.StatusTooManyRequests)
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "too many connections"))
+		_ = conn.Close()
 		return
 	}
 	mu.Unlock()
-
-	// upgrade to WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
 
 	// register connection with token
 	registerConnection(playerID, conn, token)

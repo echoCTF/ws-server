@@ -634,8 +634,9 @@ func removePIDFile(path string) {
 	_ = os.Remove(path)
 }
 
-// pidFileExists checks if the PID file exists and reads its PID.
-// Returns the PID and true if the file exists and contains a valid integer, otherwise 0 and false.
+// pidFileExists checks if the PID file exists and its PID is still running.
+// Returns the PID and true only if the file exists, contains a valid integer,
+// and that process is alive. A stale PID file returns 0, false.
 func pidFileExists(path string) (int, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -643,6 +644,15 @@ func pidFileExists(path string) (int, bool) {
 	}
 	var pid int
 	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
+		return 0, false
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return 0, false
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		// Process is gone; treat the PID file as stale.
 		return 0, false
 	}
 	return pid, true

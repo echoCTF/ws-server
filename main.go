@@ -658,9 +658,12 @@ func startTokenRevalidation(interval time.Duration, stopCh <-chan struct{}) {
 						_, valid := validateToken(wc.token, false)
 						if !valid {
 							logrus.WithFields(logrus.Fields{
+								"event":     "ws_reject",
+								"reason":    "token_not_found",
 								"player_id": playerID,
-							}).Info("Token invalid, closing connection")
-							_ = wc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token expired"))
+								"token":     wc.token,
+							}).Warn("Closing connection: token not found")
+							_ = wc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token not found"))
 							_ = wc.conn.Close()
 							delete(conns, c)
 						}

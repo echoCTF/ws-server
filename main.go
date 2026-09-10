@@ -478,7 +478,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // publishHandler handles incoming messages from authorized servers to a specific player.
-// Validates server token, enforces rate limits, delivers message immediately if the player is connected,
+// Validates server token, delivers message immediately if the player is connected,
 // or queues the message for offline delivery if not.
 func publishHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
@@ -495,11 +495,6 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "token check failed", http.StatusServiceUnavailable)
 		}
-		return
-	}
-
-	if !allow(subjectID, rateLimit, ratePeriod) {
-		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
 
@@ -560,7 +555,7 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 
 // broadcastHandler handles incoming broadcast messages from authorized servers.
 // Can target a specific player or all connected players.
-// Enforces rate limits and increments metrics for delivered messages.
+// Increments metrics for delivered messages.
 func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
@@ -576,11 +571,6 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "token check failed", http.StatusServiceUnavailable)
 		}
-		return
-	}
-
-	if !allow(subjectID, rateLimit, time.Second) {
-		http.Error(w, "rate limit", http.StatusTooManyRequests)
 		return
 	}
 

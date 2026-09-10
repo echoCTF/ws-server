@@ -611,7 +611,6 @@ func startTokenRevalidation(interval time.Duration, stopCh <-chan struct{}) {
 							_ = wc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token expired"))
 							_ = wc.conn.Close()
 							delete(conns, c)
-							connections.Dec()
 						}
 					}
 				}

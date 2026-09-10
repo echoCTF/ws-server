@@ -44,6 +44,7 @@ var (
 	logLevel                   string
 	daemonize                  bool
 	pidFile                    string
+	logFormat                  string
 )
 
 type wsConnection struct {
@@ -151,6 +152,7 @@ func parseFlags() {
 	flag.StringVar(&origins, "origins", "", "Allowed WS origins")
 	flag.StringVar(&logFile, "log-file", "", "Path to log file")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level")
+	flag.StringVar(&logFormat, "log-format", "json", "Log format: json or text")
 	flag.StringVar(&pidFile, "pid-file", "", "Path to PID file")
 	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "")
 	flag.IntVar(&rateLimit, "rate-limit", 200, "")
@@ -956,7 +958,17 @@ func daemonizeSelf() error {
 // Returns an error if the log file cannot be opened or if the log level is invalid.
 // The opened log file handle is stored in logFileHandle so it can be closed on shutdown.
 func setupLogging() error {
-	logrus.SetFormatter(&logrus.JSONFormatter{})
+	switch strings.ToLower(logFormat) {
+	case "json":
+		logrus.SetFormatter(&logrus.JSONFormatter{})
+	case "text":
+		logrus.SetFormatter(&logrus.TextFormatter{
+			FullTimestamp: true,
+			DisableColors: logFile != "",
+		})
+	default:
+		return fmt.Errorf("invalid log format: %s (want json or text)", logFormat)
+	}
 
 	if logFile != "" {
 		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)

@@ -667,7 +667,12 @@ func buildServer() *http.Server {
 	mux.HandleFunc("/broadcast", broadcastHandler)
 	mux.Handle("/metrics", promhttp.Handler())
 
-	return &http.Server{Addr: serverAddr, Handler: mux}
+	return &http.Server{
+		Addr:              serverAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 }
 
 // runServer starts the HTTP server and blocks until it shuts down.

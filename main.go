@@ -196,6 +196,9 @@ func initDB() error {
 	switch dbDriver {
 	case "sqlite":
 		db, err = sql.Open("sqlite", dbDSN)
+		if err == nil {
+			db.SetMaxOpenConns(1)
+		}
 	case "mysql":
 		db, err = sql.Open("mysql", dbDSN)
 		if err == nil {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	logrus "github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 	_ "modernc.org/sqlite"
 )
 
@@ -37,14 +39,17 @@ var (
 	offlineTTL                 time.Duration
 	maxQueuedMessagesPerPlayer int
 	maxConnectionsPerPlayer    int
-	rateLimit                  int
-	ratePeriod                 time.Duration
 	tokenRevalidationPeriod    time.Duration
 	logFile                    string
 	logLevel                   string
 	daemonize                  bool
 	pidFile                    string
 	logFormat                  string
+	rateLimitIP                int
+	rateBurstIP                int
+	rateLimitPlayer            int
+	rateBurstPlayer            int
+	trustXFF                   bool
 )
 
 type wsConnection struct {
@@ -124,21 +129,104 @@ var (
 		Help: "Total messages successfully sent to connected players",
 	})
 
-	// Rate limiting
-	limiters = make(map[string]*limiter)
-	lm       sync.Mutex
-
 	// logFileHandle holds the open log file so it can be closed on shutdown.
 	logFileHandle *os.File
 )
 
-type limiter struct {
-	tokens int
-	last   time.Time
+type rateEntry struct {
+	lim      *rate.Limiter
+	lastSeen time.Time
+}
+
+var (
+	ipLimiters     = make(map[string]*rateEntry)
+	ipMu           sync.Mutex
+	playerLimiters = make(map[string]*rateEntry)
+	playerMu       sync.Mutex
+)
+
+// clientIP returns the address used for IP-keyed rate limiting. When
+// trustXFF is set, it trusts X-Forwarded-For, which nginx overwrites with
+// $remote_addr. Otherwise it uses the direct peer address, which is not
+// spoofable but is the proxy's address when behind nginx.
+func clientIP(r *http.Request) string {
+	if trustXFF {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// nginx sets a single value; take the leftmost to be safe
+			// against a client that pre-populated the header.
+			if i := strings.IndexByte(xff, ','); i >= 0 {
+				return strings.TrimSpace(xff[:i])
+			}
+			return strings.TrimSpace(xff)
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func allowIP(ip string) bool {
+	ipMu.Lock()
+	defer ipMu.Unlock()
+	e, ok := ipLimiters[ip]
+	if !ok {
+		e = &rateEntry{
+			lim: rate.NewLimiter(rate.Limit(rateLimitIP), rateBurstIP),
+		}
+		ipLimiters[ip] = e
+	}
+	e.lastSeen = time.Now()
+	return e.lim.Allow()
+}
+
+func allowPlayer(playerID string) bool {
+	playerMu.Lock()
+	defer playerMu.Unlock()
+	e, ok := playerLimiters[playerID]
+	if !ok {
+		e = &rateEntry{
+			lim: rate.NewLimiter(rate.Limit(rateLimitPlayer), rateBurstPlayer),
+		}
+		playerLimiters[playerID] = e
+	}
+	e.lastSeen = time.Now()
+	return e.lim.Allow()
+}
+
+func startRateLimiterCleanup(stopCh <-chan struct{}) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-30 * time.Minute)
+				ipMu.Lock()
+				for k, e := range ipLimiters {
+					if e.lastSeen.Before(cutoff) {
+						delete(ipLimiters, k)
+					}
+				}
+				ipMu.Unlock()
+				playerMu.Lock()
+				for k, e := range playerLimiters {
+					if e.lastSeen.Before(cutoff) {
+						delete(playerLimiters, k)
+					}
+				}
+				playerMu.Unlock()
+			}
+		}
+	}()
 }
 
 // parseFlags parses command-line flags into global configuration variables.
-// It supports database driver, DSN, server address, log file/level, PID file, and various WS server limits.
+// It supports database driver, DSN, server address, log file/level/format, PID
+// file, WS server limits, and the /ws connection-attempt rate limiter.
 func parseFlags() {
 	var origins string
 
@@ -150,47 +238,21 @@ func parseFlags() {
 	flag.StringVar(&logLevel, "log-level", "info", "Log level")
 	flag.StringVar(&logFormat, "log-format", "json", "Log format: json or text")
 	flag.StringVar(&pidFile, "pid-file", "", "Path to PID file")
-	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "")
-	flag.IntVar(&rateLimit, "rate-limit", 200, "")
-	flag.DurationVar(&ratePeriod, "rate-period", time.Second, "")
-	flag.IntVar(&maxConnectionsPerPlayer, "max-conns", 10, "")
-	flag.DurationVar(&tokenRevalidationPeriod, "revalidate-period", time.Minute, "")
-	flag.DurationVar(&offlineTTL, "offline-ttl", 10*time.Second, "")
+	flag.IntVar(&maxQueuedMessagesPerPlayer, "max-queued", 100, "Max offline queued messages per player")
+	flag.IntVar(&maxConnectionsPerPlayer, "max-conns", 10, "Max concurrent WS connections per player")
+	flag.DurationVar(&tokenRevalidationPeriod, "revalidate-period", time.Minute, "Token revalidation interval")
+	flag.DurationVar(&offlineTTL, "offline-ttl", 10*time.Second, "Offline message TTL")
+	flag.IntVar(&rateLimitIP, "rate-limit-ip", 5, "WS connection attempts per second per client IP")
+	flag.IntVar(&rateBurstIP, "rate-burst-ip", 20, "WS connection attempt burst per client IP")
+	flag.IntVar(&rateLimitPlayer, "rate-limit-player", 2, "WS connection attempts per second per player")
+	flag.IntVar(&rateBurstPlayer, "rate-burst-player", 5, "WS connection attempt burst per player")
+	flag.BoolVar(&trustXFF, "trust-xff", false, "Trust X-Forwarded-For for client IP (only behind a trusted proxy)")
 	flag.BoolVar(&daemonize, "daemon", false, "")
 	flag.Parse()
 
 	if origins != "" {
 		allowedOrigins = strings.Split(origins, ",")
 	}
-}
-
-// allow implements a simple token-based rate limiter for a given key.
-// Returns true if the action is allowed, false if the rate limit has been exceeded.
-func allow(key string, rate int, per time.Duration) bool {
-	lm.Lock()
-	defer lm.Unlock()
-
-	l, ok := limiters[key]
-	if !ok {
-		limiters[key] = &limiter{tokens: rate, last: time.Now()}
-		return true
-	}
-
-	elapsed := time.Since(l.last)
-	refill := int(elapsed / per)
-	if refill > 0 {
-		l.tokens += refill
-		if l.tokens > rate {
-			l.tokens = rate
-		}
-		l.last = time.Now()
-	}
-
-	if l.tokens > 0 {
-		l.tokens--
-		return true
-	}
-	return false
 }
 
 // ///////////////////
@@ -360,6 +422,21 @@ func flushPendingMessages(playerID string, wc *wsConnection) {
 // normal close frame, so browser-side code can still branch on the close code.
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
+	ip := clientIP(r)
+
+	// IP rate limit, pre-auth.
+	if !allowIP(ip) {
+		logrus.WithFields(logrus.Fields{
+			"event":  "ws_reject",
+			"reason": "rate_limit_ip",
+			"ip":     ip,
+			"origin": r.Header.Get("Origin"),
+			"xff":    r.Header.Get("X-Forwarded-For"),
+		}).Warn("Connection rejected: IP rate limit")
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
 
 	// Validate before upgrade, but do not short-circuit: a rejection is
 	// signalled via X-WS-Reject on the 101 response plus a close frame.
@@ -380,6 +457,22 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Player rate limit, post-auth. Only checked when the token was valid;
+	// an invalid token already rejected above.
+	if rejectReason == "" && !allowPlayer(playerID) {
+		logrus.WithFields(logrus.Fields{
+			"event":     "ws_reject",
+			"reason":    "rate_limit_player",
+			"player_id": playerID,
+			"token":     token,
+			"ip":        ip,
+			"origin":    r.Header.Get("Origin"),
+			"xff":       r.Header.Get("X-Forwarded-For"),
+		}).Warn("Connection rejected: player rate limit")
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return
+	}
 	// Response headers for the 101. X-WS-Reject is only set when the
 	// connection will be closed immediately after the upgrade; nginx maps
 	// it to a real status code in the access log.
@@ -395,7 +488,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			"reason": "upgrade_failed",
 			"token":  token,
 			"err":    err.Error(),
-			"ip":     r.RemoteAddr,
+			"ip":     ip,
 			"origin": r.Header.Get("Origin"),
 			"xff":    r.Header.Get("X-Forwarded-For"),
 		}).Warn("Connection rejected: upgrade failed")
@@ -410,7 +503,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			logrus.WithFields(logrus.Fields{
 				"event":  "ws_reject",
 				"reason": "missing_token",
-				"ip":     r.RemoteAddr,
+				"ip":     ip,
 				"origin": r.Header.Get("Origin"),
 				"xff":    r.Header.Get("X-Forwarded-For"),
 			}).Warn("Connection rejected: missing token")
@@ -422,7 +515,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				"event":  "ws_reject",
 				"reason": "invalid_token",
 				"token":  token,
-				"ip":     r.RemoteAddr,
+				"ip":     ip,
 				"origin": r.Header.Get("Origin"),
 				"xff":    r.Header.Get("X-Forwarded-For"),
 			}).Warn("Connection rejected: invalid token")
@@ -434,7 +527,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				"event":  "ws_reject",
 				"reason": "token_check_failed",
 				"token":  token,
-				"ip":     r.RemoteAddr,
+				"ip":     ip,
 				"origin": r.Header.Get("Origin"),
 				"xff":    r.Header.Get("X-Forwarded-For"),
 			}).Warn("Connection rejected: token check failed")
@@ -458,7 +551,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			"token":     token,
 			"current":   current,
 			"limit":     maxConnectionsPerPlayer,
-			"ip":        r.RemoteAddr,
+			"ip":        ip,
 			"origin":    r.Header.Get("Origin"),
 			"xff":       r.Header.Get("X-Forwarded-For"),
 		}).Warn("Connection rejected: too many connections")
@@ -477,7 +570,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		"reason":    "accepted",
 		"player_id": playerID,
 		"token":     token,
-		"ip":        r.RemoteAddr,
+		"ip":        ip,
 		"origin":    r.Header.Get("Origin"),
 		"xff":       r.Header.Get("X-Forwarded-For"),
 	}).Info("Player connected")
@@ -522,7 +615,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			"player_id": playerID,
 			"token":     token,
 			"type":      mt,
-			"ip":        r.RemoteAddr,
+			"ip":        ip,
 			"origin":    r.Header.Get("Origin"),
 			"xff":       r.Header.Get("X-Forwarded-For"),
 		}).Warn("Client sent unexpected message, closing")
@@ -533,7 +626,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		"player_id": playerID,
 		"token":     token,
 		"event":     "ws_disconnect",
-		"ip":        r.RemoteAddr,
+		"ip":        ip,
 		"origin":    r.Header.Get("Origin"),
 		"xff":       r.Header.Get("X-Forwarded-For"),
 	}).Info("Player disconnected")
@@ -1061,6 +1154,7 @@ func run() error {
 
 	stopCh := make(chan struct{})
 	startOfflineMessageCleanup(stopCh)
+	startRateLimiterCleanup(stopCh)
 	startTokenRevalidation(tokenRevalidationPeriod, stopCh)
 
 	return runServer(buildServer(), stopCh)

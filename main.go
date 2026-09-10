@@ -359,6 +359,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// heartbeat
 	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetReadLimit(256)
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
@@ -383,9 +384,21 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// main read loop
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		mt, _, err := conn.ReadMessage()
+		if err != nil {
 			break
 		}
+		// Clients are not allowed to send data; only control frames are expected.
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "client messages not accepted"))
+		logrus.WithFields(logrus.Fields{
+			"player_id": playerID,
+			"token":     token,
+			"type":      mt,
+			"ip":        r.RemoteAddr,
+			"origin":    r.Header.Get("Origin"),
+			"xff":       r.Header.Get("X-Forwarded-For"),
+		}).Warn("Client sent unexpected message, closing")
+		break
 	}
 
 	logrus.WithFields(logrus.Fields{

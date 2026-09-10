@@ -250,6 +250,7 @@ func validateToken(token string, isServer bool) (string, error) {
 	logrus.WithFields(logrus.Fields{
 		"event":  "ws_token_check",
 		"reason": "db_error",
+		"token":  token,
 		"err":    err.Error(),
 	}).Warn("Token validation failed: database error")
 	return "", err
@@ -336,6 +337,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		logrus.WithFields(logrus.Fields{
 			"event":  "ws_reject",
 			"reason": "upgrade_failed",
+			"token":  token,
 			"err":    err.Error(),
 			"ip":     r.RemoteAddr,
 			"origin": r.Header.Get("Origin"),

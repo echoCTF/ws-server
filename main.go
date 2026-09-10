@@ -743,6 +743,14 @@ func main() {
 func run() error {
 	parseFlags()
 
+	// Daemonize first: the parent exits before touching the PID file,
+	// log file, or DB, so the child owns all of those resources.
+	if daemonize {
+		if err := daemonizeSelf(); err != nil {
+			return fmt.Errorf("failed to daemonize: %w", err)
+		}
+	}
+
 	// Handle PID file
 	if err := handlePIDFile(); err != nil {
 		return err
@@ -767,18 +775,9 @@ func run() error {
 
 	defer db.Close()
 
-	// Daemonize if needed
-	if daemonize {
-		if err := daemonizeSelf(); err != nil {
-			return fmt.Errorf("failed to daemonize: %w", err)
-		}
-	}
-
 	initMetrics()
 
-	// stopCh is closed on shutdown to signal background goroutines to exit.
 	stopCh := make(chan struct{})
-
 	startOfflineMessageCleanup(stopCh)
 	startTokenRevalidation(tokenRevalidationPeriod, stopCh)
 

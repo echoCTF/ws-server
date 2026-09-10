@@ -382,8 +382,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	logrus.WithFields(logrus.Fields{
 		"player_id": playerID,
+		"token":     token,
 		"event":     "ws_connect",
 		"ip":        r.RemoteAddr,
+		"origin":    r.Header.Get("Origin"),
+		"xff":       r.Header.Get("X-Forwarded-For"),
 	}).Info("Player connected")
 
 	// heartbeat
@@ -432,7 +435,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	logrus.WithFields(logrus.Fields{
 		"player_id": playerID,
+		"token":     token,
 		"event":     "ws_disconnect",
+		"ip":        r.RemoteAddr,
+		"origin":    r.Header.Get("Origin"),
+		"xff":       r.Header.Get("X-Forwarded-For"),
 	}).Info("Player disconnected")
 }
 

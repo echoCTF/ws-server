@@ -315,10 +315,25 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	// to be signaled as a real close frame instead.
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"event":  "ws_reject",
+			"reason": "upgrade_failed",
+			"err":    err.Error(),
+			"ip":     r.RemoteAddr,
+			"origin": r.Header.Get("Origin"),
+			"xff":    r.Header.Get("X-Forwarded-For"),
+		}).Warn("Connection rejected: upgrade failed")
 		return
 	}
 
 	if token == "" {
+		logrus.WithFields(logrus.Fields{
+			"event":  "ws_reject",
+			"reason": "missing_token",
+			"ip":     r.RemoteAddr,
+			"origin": r.Header.Get("Origin"),
+			"xff":    r.Header.Get("X-Forwarded-For"),
+		}).Warn("Connection rejected: missing token")
 		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "missing token"))
 		_ = conn.Close()
 		return
@@ -326,6 +341,14 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	playerID, ok := validateToken(token, false)
 	if !ok {
+		logrus.WithFields(logrus.Fields{
+			"event":  "ws_reject",
+			"reason": "invalid_token",
+			"token":  token,
+			"ip":     r.RemoteAddr,
+			"origin": r.Header.Get("Origin"),
+			"xff":    r.Header.Get("X-Forwarded-For"),
+		}).Warn("Connection rejected: invalid token")
 		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid token"))
 		_ = conn.Close()
 		return
@@ -337,9 +360,15 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	if current >= maxConnectionsPerPlayer {
 		mu.Unlock()
 		logrus.WithFields(logrus.Fields{
+			"event":     "ws_reject",
+			"reason":    "too_many_connections",
 			"player_id": playerID,
+			"token":     token,
 			"current":   current,
 			"limit":     maxConnectionsPerPlayer,
+			"ip":        r.RemoteAddr,
+			"origin":    r.Header.Get("Origin"),
+			"xff":       r.Header.Get("X-Forwarded-For"),
 		}).Warn("Connection rejected: too many connections")
 		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "too many connections"))
 		_ = conn.Close()

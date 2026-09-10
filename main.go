@@ -101,6 +101,10 @@ var (
 
 	// logFileHandle holds the open log file so it can be closed on shutdown.
 	logFileHandle *os.File
+
+	// ErrTokenNotFound means the token row does not exist. Any other error from
+	// validateToken is a backend failure (DB down, timeout, etc.).
+	ErrTokenNotFound = errors.New("token not found")
 )
 
 type limiter struct {
@@ -216,9 +220,10 @@ func initDB() error {
 	return db.Ping()
 }
 
-// validateToken checks whether a given token is valid in the database.
-// Returns the associated player/subject ID and true if valid, or empty string and false if invalid.
-func validateToken(token string, isServer bool) (string, bool) {
+// validateToken checks whether a given token exists in the database.
+// Returns the associated player/subject ID on success, ErrTokenNotFound if no
+// matching row exists, or the underlying DB error on backend failure.
+func validateToken(token string, isServer bool) (string, error) {
 	const q = `
 		SELECT IFNULL(player_id, subject_id)
 		FROM ws_token
@@ -229,13 +234,13 @@ func validateToken(token string, isServer bool) (string, bool) {
 	var sid string
 	err := db.QueryRow(q, token, isServer).Scan(&sid)
 	if err == nil {
-		return sid, true
+		return sid, nil
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false
+		return "", ErrTokenNotFound
 	}
 	logrus.WithError(err).Error("validateToken error")
-	return "", false
+	return "", err
 }
 
 // registerConnection registers a websocket connection for a player, storing the associated token.
@@ -339,17 +344,31 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	playerID, ok := validateToken(token, false)
-	if !ok {
-		logrus.WithFields(logrus.Fields{
-			"event":  "ws_reject",
-			"reason": "invalid_token",
-			"token":  token,
-			"ip":     r.RemoteAddr,
-			"origin": r.Header.Get("Origin"),
-			"xff":    r.Header.Get("X-Forwarded-For"),
-		}).Warn("Connection rejected: invalid token")
-		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid token"))
+	playerID, err := validateToken(token, false)
+
+	if err != nil {
+		if errors.Is(err, ErrTokenNotFound) {
+			logrus.WithFields(logrus.Fields{
+				"event":  "ws_reject",
+				"reason": "invalid_token",
+				"token":  token,
+				"ip":     r.RemoteAddr,
+				"origin": r.Header.Get("Origin"),
+				"xff":    r.Header.Get("X-Forwarded-For"),
+			}).Warn("Connection rejected: invalid token")
+			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid token"))
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"event":  "ws_reject",
+				"reason": "token_check_failed",
+				"token":  token,
+				"err":    err.Error(),
+				"ip":     r.RemoteAddr,
+				"origin": r.Header.Get("Origin"),
+				"xff":    r.Header.Get("X-Forwarded-For"),
+			}).Warn("Connection rejected: token check failed")
+			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "token check failed"))
+		}
 		_ = conn.Close()
 		return
 	}
@@ -454,9 +473,13 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	token := auth[7:]
 
-	subjectID, ok := validateToken(token, true)
-	if !ok {
-		http.Error(w, "invalid server token", http.StatusForbidden)
+	subjectID, err := validateToken(token, true)
+	if err != nil {
+		if errors.Is(err, ErrTokenNotFound) {
+			http.Error(w, "invalid server token", http.StatusForbidden)
+		} else {
+			http.Error(w, "token check failed", http.StatusServiceUnavailable)
+		}
 		return
 	}
 
@@ -525,9 +548,13 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	token := auth[7:]
 
-	subjectID, ok := validateToken(token, true)
-	if !ok {
-		http.Error(w, "invalid server token", http.StatusForbidden)
+	subjectID, err := validateToken(token, true)
+	if err != nil {
+		if errors.Is(err, ErrTokenNotFound) {
+			http.Error(w, "invalid server token", http.StatusForbidden)
+		} else {
+			http.Error(w, "token check failed", http.StatusServiceUnavailable)
+		}
 		return
 	}
 
@@ -655,8 +682,11 @@ func startTokenRevalidation(interval time.Duration, stopCh <-chan struct{}) {
 				mu.Lock()
 				for playerID, conns := range players {
 					for c, wc := range conns {
-						_, valid := validateToken(wc.token, false)
-						if !valid {
+						_, err := validateToken(wc.token, false)
+						switch {
+						case err == nil:
+							// still valid
+						case errors.Is(err, ErrTokenNotFound):
 							logrus.WithFields(logrus.Fields{
 								"event":     "ws_reject",
 								"reason":    "token_not_found",
@@ -666,6 +696,9 @@ func startTokenRevalidation(interval time.Duration, stopCh <-chan struct{}) {
 							_ = wc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token not found"))
 							_ = wc.conn.Close()
 							delete(conns, c)
+						default:
+							// Backend error — token may still be valid. Leave open, retry next tick.
+							// validateToken already logged the underlying error.
 						}
 					}
 				}

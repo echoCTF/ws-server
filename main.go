@@ -326,13 +326,42 @@ func flushPendingMessages(playerID string, c *websocket.Conn) {
 // wsHandler handles incoming websocket upgrade requests from clients.
 // Validates the token, enforces connection limits, sets up heartbeat, and reads messages.
 // Connections are automatically unregistered on disconnect.
+//
+// The token is validated *before* the upgrade so that a rejected attempt can be
+// tagged on the 101 response via X-WS-Reject, which nginx maps to a real status
+// code in the access log. The upgrade still completes and the client receives a
+// normal close frame, so browser-side code can still branch on the close code.
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 
-	// Upgrade first, authenticate after. A rejected pre-handshake status
-	// is invisible to the browser's WebSocket API, so auth failure has
-	// to be signaled as a real close frame instead.
-	conn, err := upgrader.Upgrade(w, r, nil)
+	// Validate before upgrade, but do not short-circuit: a rejection is
+	// signalled via X-WS-Reject on the 101 response plus a close frame.
+	var rejectReason string
+	var playerID string
+
+	if token == "" {
+		rejectReason = "missing_token"
+	} else {
+		var err error
+		playerID, err = validateToken(token, false)
+		if err != nil {
+			if errors.Is(err, ErrTokenNotFound) {
+				rejectReason = "invalid_token"
+			} else {
+				rejectReason = "token_check_failed"
+			}
+		}
+	}
+
+	// Response headers for the 101. X-WS-Reject is only set when the
+	// connection will be closed immediately after the upgrade; nginx maps
+	// it to a real status code in the access log.
+	respHeader := http.Header{}
+	if rejectReason != "" {
+		respHeader.Set("X-WS-Reject", rejectReason)
+	}
+
+	conn, err := upgrader.Upgrade(w, r, respHeader)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"event":  "ws_reject",
@@ -346,43 +375,33 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if token == "" {
-		logrus.WithFields(logrus.Fields{
+	// If validation failed, log the rejection and close the upgraded socket.
+	// Client sees a normal close frame, not an HTTP-level error.
+	if rejectReason != "" {
+		fields := logrus.Fields{
 			"event":  "ws_reject",
-			"reason": "missing_token",
+			"reason": rejectReason,
 			"ip":     r.RemoteAddr,
 			"origin": r.Header.Get("Origin"),
 			"xff":    r.Header.Get("X-Forwarded-For"),
-		}).Warn("Connection rejected: missing token")
-		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "missing token"))
-		_ = conn.Close()
-		return
-	}
-
-	playerID, err := validateToken(token, false)
-
-	if err != nil {
-		if errors.Is(err, ErrTokenNotFound) {
-			logrus.WithFields(logrus.Fields{
-				"event":  "ws_reject",
-				"reason": "invalid_token",
-				"token":  token,
-				"ip":     r.RemoteAddr,
-				"origin": r.Header.Get("Origin"),
-				"xff":    r.Header.Get("X-Forwarded-For"),
-			}).Warn("Connection rejected: invalid token")
-			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid token"))
-		} else {
-			logrus.WithFields(logrus.Fields{
-				"event":  "ws_reject",
-				"reason": "token_check_failed",
-				"token":  token,
-				"ip":     r.RemoteAddr,
-				"origin": r.Header.Get("Origin"),
-				"xff":    r.Header.Get("X-Forwarded-For"),
-			}).Warn("Connection rejected: token check failed")
-			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "token check failed"))
 		}
+		if token != "" {
+			fields["token"] = token
+		}
+
+		var closeCode int
+		switch rejectReason {
+		case "missing_token", "invalid_token":
+			closeCode = websocket.ClosePolicyViolation // 1008
+		case "token_check_failed":
+			closeCode = websocket.CloseTryAgainLater // 1013
+		default:
+			closeCode = websocket.ClosePolicyViolation
+		}
+
+		logrus.WithFields(fields).Warn("Connection rejected")
+		_ = conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(closeCode, rejectReason))
 		_ = conn.Close()
 		return
 	}

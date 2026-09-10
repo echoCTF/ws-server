@@ -49,6 +49,26 @@ var (
 type wsConnection struct {
 	conn  *websocket.Conn
 	token string
+	mu    sync.Mutex
+}
+
+// writeJSON serializes a JSON write against any other writer on this conn.
+// Gorilla requires at most one concurrent writer per connection for all
+// write methods except WriteControl and Close.
+func (wc *wsConnection) writeJSON(v interface{}) error {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.conn.WriteJSON(v)
+}
+
+// writeClose sends a close frame, serialized against other writers.
+func (wc *wsConnection) writeClose(code int, reason string) error {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.conn.WriteMessage(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(code, reason),
+	)
 }
 
 // revalEntry is a snapshot of a live connection, taken before the DB sweep,
@@ -258,17 +278,22 @@ func validateToken(token string, isServer bool) (string, error) {
 
 // registerConnection registers a websocket connection for a player, storing the associated token.
 // It also increments the active connections metric and flushes any pending messages to the new connection.
-func registerConnection(playerID string, c *websocket.Conn, token string) {
+// Returns the wsConnection so the caller can use its serialized write helpers.
+func registerConnection(playerID string, c *websocket.Conn, token string) *wsConnection {
+	wc := &wsConnection{conn: c, token: token}
+
 	mu.Lock()
 	if players[playerID] == nil {
 		players[playerID] = make(map[*websocket.Conn]*wsConnection)
 	}
-	players[playerID][c] = &wsConnection{conn: c, token: token}
+	players[playerID][c] = wc
 	mu.Unlock()
 
 	connections.Inc()
 
-	flushPendingMessages(playerID, c)
+	flushPendingMessages(playerID, wc)
+
+	return wc
 }
 
 // unregisterConnection removes a websocket connection for a player, explicitly closes the underlying
@@ -300,13 +325,13 @@ func closeAllConnections() {
 
 // flushPendingMessages sends any queued offline messages to a newly connected websocket.
 // Messages older than offlineTTL are ignored and removed.
-func flushPendingMessages(playerID string, c *websocket.Conn) {
+func flushPendingMessages(playerID string, wc *wsConnection) {
 	pendingMu.Lock()
 	msgs := pendingMessages[playerID]
 	if len(msgs) > 0 {
 		for _, pm := range msgs {
 			if time.Since(pm.timestamp) <= offlineTTL {
-				_ = c.WriteJSON(pm.msg)
+				_ = wc.writeJSON(pm.msg)
 				messagesDelivered.Inc()
 				logrus.WithFields(logrus.Fields{
 					"event":     "ws_deliver",
@@ -378,30 +403,43 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	// If validation failed, log the rejection and close the upgraded socket.
 	// Client sees a normal close frame, not an HTTP-level error.
 	if rejectReason != "" {
-		fields := logrus.Fields{
-			"event":  "ws_reject",
-			"reason": rejectReason,
-			"ip":     r.RemoteAddr,
-			"origin": r.Header.Get("Origin"),
-			"xff":    r.Header.Get("X-Forwarded-For"),
-		}
-		if token != "" {
-			fields["token"] = token
-		}
-
-		var closeCode int
 		switch rejectReason {
-		case "missing_token", "invalid_token":
-			closeCode = websocket.ClosePolicyViolation // 1008
+		case "missing_token":
+			logrus.WithFields(logrus.Fields{
+				"event":  "ws_reject",
+				"reason": "missing_token",
+				"ip":     r.RemoteAddr,
+				"origin": r.Header.Get("Origin"),
+				"xff":    r.Header.Get("X-Forwarded-For"),
+			}).Warn("Connection rejected: missing token")
+			_ = conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "missing token"))
+
+		case "invalid_token":
+			logrus.WithFields(logrus.Fields{
+				"event":  "ws_reject",
+				"reason": "invalid_token",
+				"token":  token,
+				"ip":     r.RemoteAddr,
+				"origin": r.Header.Get("Origin"),
+				"xff":    r.Header.Get("X-Forwarded-For"),
+			}).Warn("Connection rejected: invalid token")
+			_ = conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid token"))
+
 		case "token_check_failed":
-			closeCode = websocket.CloseTryAgainLater // 1013
-		default:
-			closeCode = websocket.ClosePolicyViolation
+			logrus.WithFields(logrus.Fields{
+				"event":  "ws_reject",
+				"reason": "token_check_failed",
+				"token":  token,
+				"ip":     r.RemoteAddr,
+				"origin": r.Header.Get("Origin"),
+				"xff":    r.Header.Get("X-Forwarded-For"),
+			}).Warn("Connection rejected: token check failed")
+			_ = conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "token check failed"))
 		}
 
-		logrus.WithFields(fields).Warn("Connection rejected")
-		_ = conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(closeCode, rejectReason))
 		_ = conn.Close()
 		return
 	}
@@ -429,7 +467,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	// register connection with token
-	registerConnection(playerID, conn, token)
+	wc := registerConnection(playerID, conn, token)
 	defer unregisterConnection(playerID, conn)
 
 	logrus.WithFields(logrus.Fields{
@@ -462,6 +500,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			case <-done:
 				return
 			case <-ticker.C:
+				// WriteControl is safe to call concurrently with other writes.
 				_ = conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second))
 			}
 		}
@@ -474,7 +513,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		// Clients are not allowed to send data; only control frames are expected.
-		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "client messages not accepted"))
+		_ = wc.writeClose(websocket.ClosePolicyViolation, "client messages not accepted")
 		logrus.WithFields(logrus.Fields{
 			"event":     "ws_reject",
 			"reason":    "client_data_frame",
@@ -556,7 +595,7 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		pendingMu.Unlock()
 	} else {
 		for _, wc := range conns {
-			_ = wc.conn.WriteJSON(wsMsg)
+			_ = wc.writeJSON(wsMsg)
 			messagesDelivered.Inc()
 		}
 		logrus.WithFields(logrus.Fields{
@@ -609,7 +648,7 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 	delivered := 0
 	if req.PlayerID != nil {
 		for _, wc := range players[*req.PlayerID] {
-			_ = wc.conn.WriteJSON(wsMsg)
+			_ = wc.writeJSON(wsMsg)
 			messagesDelivered.Inc()
 			delivered++
 		}
@@ -624,7 +663,7 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		for _, conns := range players {
 			for _, wc := range conns {
-				_ = wc.conn.WriteJSON(wsMsg)
+				_ = wc.writeJSON(wsMsg)
 				messagesDelivered.Inc()
 				delivered++
 			}
@@ -809,7 +848,7 @@ func revalidateOnce() {
 			"token":     e.token,
 			"source":    "revalidation",
 		}).Info("Closing connection: token not found")
-		_ = wc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token not found"))
+		_ = wc.writeClose(websocket.ClosePolicyViolation, "token not found")
 		_ = wc.conn.Close()
 		delete(conns, e.conn)
 		if len(conns) == 0 {

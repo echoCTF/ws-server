@@ -51,6 +51,14 @@ type wsConnection struct {
 	token string
 }
 
+// revalEntry is a snapshot of a live connection, taken before the DB sweep,
+// so the sweep can run without holding mu.
+type revalEntry struct {
+	playerID string
+	conn     *websocket.Conn
+	token    string
+}
+
 // ///////////////////
 // GLOBALS
 // ///////////////////
@@ -239,7 +247,11 @@ func validateToken(token string, isServer bool) (string, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrTokenNotFound
 	}
-	logrus.WithError(err).Error("validateToken error")
+	logrus.WithFields(logrus.Fields{
+		"event":  "ws_token_check",
+		"reason": "db_error",
+		"err":    err.Error(),
+	}).Warn("Token validation failed: database error")
 	return "", err
 }
 
@@ -296,11 +308,12 @@ func flushPendingMessages(playerID string, c *websocket.Conn) {
 				_ = c.WriteJSON(pm.msg)
 				messagesDelivered.Inc()
 				logrus.WithFields(logrus.Fields{
+					"event":     "ws_deliver",
+					"reason":    "offline_flush",
 					"player_id": playerID,
-					"event":     pm.msg.Event,
+					"app_event": pm.msg.Event,
 					"queued_at": pm.timestamp,
 					"age_ms":    time.Since(pm.timestamp).Milliseconds(),
-					"source":    "offline_queue",
 				}).Info("Delivered queued WS message")
 			}
 		}
@@ -362,7 +375,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				"event":  "ws_reject",
 				"reason": "token_check_failed",
 				"token":  token,
-				"err":    err.Error(),
 				"ip":     r.RemoteAddr,
 				"origin": r.Header.Get("Origin"),
 				"xff":    r.Header.Get("X-Forwarded-For"),
@@ -400,9 +412,10 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	defer unregisterConnection(playerID, conn)
 
 	logrus.WithFields(logrus.Fields{
+		"event":     "ws_connect",
+		"reason":    "accepted",
 		"player_id": playerID,
 		"token":     token,
-		"event":     "ws_connect",
 		"ip":        r.RemoteAddr,
 		"origin":    r.Header.Get("Origin"),
 		"xff":       r.Header.Get("X-Forwarded-For"),
@@ -442,6 +455,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		// Clients are not allowed to send data; only control frames are expected.
 		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "client messages not accepted"))
 		logrus.WithFields(logrus.Fields{
+			"event":     "ws_reject",
+			"reason":    "client_data_frame",
 			"player_id": playerID,
 			"token":     token,
 			"type":      mt,
@@ -502,18 +517,22 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 
 	if numConns == 0 {
 		logrus.WithFields(logrus.Fields{
+			"event":      "ws_queue",
+			"reason":     "queued",
 			"subject_id": subjectID,
 			"player_id":  msg.PlayerID,
-			"event":      msg.Event,
-		}).Warn("Player not connected, queueing message")
+			"app_event":  msg.Event,
+		}).Info("Player not connected, queueing message")
 
 		pendingMu.Lock()
 		queue := pendingMessages[msg.PlayerID]
 		if len(queue) >= maxQueuedMessagesPerPlayer {
 			queue = queue[1:]
 			logrus.WithFields(logrus.Fields{
+				"event":     "ws_queue",
+				"reason":    "queue_overflow",
 				"player_id": msg.PlayerID,
-				"event":     msg.Event,
+				"app_event": msg.Event,
 				"limit":     maxQueuedMessagesPerPlayer,
 			}).Warn("Offline queue full, dropping oldest message")
 		}
@@ -525,9 +544,11 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 			messagesDelivered.Inc()
 		}
 		logrus.WithFields(logrus.Fields{
+			"event":       "ws_deliver",
+			"reason":      "live",
 			"subject_id":  subjectID,
 			"player_id":   msg.PlayerID,
-			"event":       msg.Event,
+			"app_event":   msg.Event,
 			"connections": numConns,
 		}).Info("Message delivered to player")
 	}
@@ -574,18 +595,36 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 
+	delivered := 0
 	if req.PlayerID != nil {
 		for _, wc := range players[*req.PlayerID] {
 			_ = wc.conn.WriteJSON(wsMsg)
 			messagesDelivered.Inc()
+			delivered++
 		}
+		logrus.WithFields(logrus.Fields{
+			"event":      "ws_deliver",
+			"reason":     "broadcast_player",
+			"subject_id": subjectID,
+			"player_id":  *req.PlayerID,
+			"app_event":  req.Event,
+			"delivered":  delivered,
+		}).Info("Broadcast delivered to player")
 	} else {
 		for _, conns := range players {
 			for _, wc := range conns {
 				_ = wc.conn.WriteJSON(wsMsg)
 				messagesDelivered.Inc()
+				delivered++
 			}
 		}
+		logrus.WithFields(logrus.Fields{
+			"event":      "ws_deliver",
+			"reason":     "broadcast_all",
+			"subject_id": subjectID,
+			"app_event":  req.Event,
+			"delivered":  delivered,
+		}).Info("Broadcast delivered to all players")
 	}
 
 	messagesPublished.Inc()
@@ -679,33 +718,112 @@ func startTokenRevalidation(interval time.Duration, stopCh <-chan struct{}) {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				mu.Lock()
-				for playerID, conns := range players {
-					for c, wc := range conns {
-						_, err := validateToken(wc.token, false)
-						switch {
-						case err == nil:
-							// still valid
-						case errors.Is(err, ErrTokenNotFound):
-							logrus.WithFields(logrus.Fields{
-								"event":     "ws_reject",
-								"reason":    "token_not_found",
-								"player_id": playerID,
-								"token":     wc.token,
-							}).Warn("Closing connection: token not found")
-							_ = wc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token not found"))
-							_ = wc.conn.Close()
-							delete(conns, c)
-						default:
-							// Backend error — token may still be valid. Leave open, retry next tick.
-							// validateToken already logged the underlying error.
-						}
-					}
-				}
-				mu.Unlock()
+				revalidateOnce()
 			}
 		}
 	}()
+}
+
+// revalidateOnce runs a single token-revalidation sweep in three phases:
+//
+//  1. Snapshot the live connections under a brief lock.
+//  2. Query the database for each token with no lock held, so publishes,
+//     connects, disconnects, and broadcasts are never blocked by DB I/O.
+//  3. Re-acquire the lock briefly and close only the connections that are
+//     still exactly the ones we snapshotted - a connection that disconnected
+//     or was replaced mid-sweep is left alone.
+func revalidateOnce() {
+	// Phase 1: snapshot.
+	mu.Lock()
+	entries := make([]revalEntry, 0, len(players))
+	for playerID, conns := range players {
+		for c, wc := range conns {
+			entries = append(entries, revalEntry{
+				playerID: playerID,
+				conn:     c,
+				token:    wc.token,
+			})
+		}
+	}
+	mu.Unlock()
+
+	checked := len(entries)
+	if checked == 0 {
+		return
+	}
+
+	start := time.Now()
+
+	// Phase 2: query outside the lock.
+	var invalid []revalEntry
+	backendErrors := 0
+	for _, e := range entries {
+		_, err := validateToken(e.token, false)
+		switch {
+		case err == nil:
+			// Still valid, leave the connection alone.
+		case errors.Is(err, ErrTokenNotFound):
+			invalid = append(invalid, e)
+		default:
+			// Backend error - the token may still be valid. Skip and retry
+			// next tick so a DB blip doesn't mass-disconnect.
+			// validateToken already logged the underlying error.
+			backendErrors++
+		}
+	}
+
+	// Phase 3: reconcile under a brief lock.
+	closed := 0
+	mu.Lock()
+	for _, e := range invalid {
+		conns, ok := players[e.playerID]
+		if !ok {
+			// Player has no connections any more.
+			continue
+		}
+		wc, ok := conns[e.conn]
+		if !ok || wc.token != e.token {
+			// This exact connection is gone or was replaced during the sweep.
+			continue
+		}
+		logrus.WithFields(logrus.Fields{
+			"event":     "ws_reject",
+			"reason":    "token_not_found",
+			"player_id": e.playerID,
+			"token":     e.token,
+			"source":    "revalidation",
+		}).Info("Closing connection: token not found")
+		_ = wc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token not found"))
+		_ = wc.conn.Close()
+		delete(conns, e.conn)
+		if len(conns) == 0 {
+			delete(players, e.playerID)
+		}
+		closed++
+	}
+	mu.Unlock()
+
+	// Sweep summary. Only emitted at Warn when something needed attention;
+	// otherwise Debug, so a healthy server doesn't log once per tick.
+	elapsed := time.Since(start).Milliseconds()
+	if backendErrors > 0 {
+		logrus.WithFields(logrus.Fields{
+			"event":          "ws_revalidate",
+			"reason":         "sweep_backend_errors",
+			"checked":        checked,
+			"closed":         closed,
+			"backend_errors": backendErrors,
+			"duration_ms":    elapsed,
+		}).Warn("Token revalidation sweep completed with DB errors")
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"event":       "ws_revalidate",
+			"reason":      "sweep_completed",
+			"checked":     checked,
+			"closed":      closed,
+			"duration_ms": elapsed,
+		}).Debug("Token revalidation sweep completed")
+	}
 }
 
 // writePIDFile writes the current process PID to the specified file path.

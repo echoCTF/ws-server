@@ -130,10 +130,6 @@ var (
 
 	// logFileHandle holds the open log file so it can be closed on shutdown.
 	logFileHandle *os.File
-
-	// ErrTokenNotFound means the token row does not exist. Any other error from
-	// validateToken is a backend failure (DB down, timeout, etc.).
-	ErrTokenNotFound = errors.New("token not found")
 )
 
 type limiter struct {
@@ -249,6 +245,10 @@ func initDB() error {
 	}
 	return db.Ping()
 }
+
+// ErrTokenNotFound means the token row does not exist. Any other error from
+// validateToken is a backend failure (DB down, timeout, etc.).
+var ErrTokenNotFound = errors.New("token not found")
 
 // validateToken checks whether a given token exists in the database.
 // Returns the associated player/subject ID on success, ErrTokenNotFound if no

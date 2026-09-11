@@ -105,13 +105,26 @@ use `/broadcast` with `player_id`.
 * `-max-conns` - Max WS connections per player (default `10`)
 * `-max-queued` - Max offline queued messages per player (default `100`)
 * `-offline-ttl` - Offline message TTL (default `10s`)
-* `-rate-limit-ip` - WS connection attempts per second per client IP (default `5`)
-* `-rate-burst-ip` - WS connection attempt burst per client IP (default `20`)
-* `-rate-limit-player` - WS connection attempts per second per player (default `2`)
-* `-rate-burst-player` - WS connection attempt burst per player (default `5`)
+* `-rate-limit-ip` - WS connection attempts per second per client IP (default `20`, disabled unless this or `-rate-burst-ip` is set)
+* `-rate-burst-ip` - WS connection attempt burst per client IP (default `60`, disabled unless this or `-rate-limit-ip` is set)
+* `-rate-limit-player` - WS connection attempts per second per player (default `3`, disabled unless this or `-rate-burst-player` is set)
+* `-rate-burst-player` - WS connection attempt burst per player (default `10`, disabled unless this or `-rate-limit-player` is set)
 * `-trust-xff` - Trust `X-Forwarded-For` for the client IP. Only enable when the server is reachable exclusively through a trusted proxy that overwrites the header (default `false`)
+* `-max-header-value` - Max bytes for the `Cookie`, `Origin`, or `X-Forwarded-For` header on `/ws` (default `8192`); oversized values are rejected with `431` before any other work, including the rate limiter
 * `-revalidate-period` - Token revalidation interval (default `1m`)
 * `-daemon` - Run process as a daemon
+
+Rate limiting is opt-in. It is disabled unless at least one of the four rate
+flags is passed on the command line. Setting any of the four to `0` (or a
+negative value) is a startup error; to disable the limiter, omit the flags.
+
+Unlike rate limiting, `-max-header-value` is always on; there's no
+legitimate reason for these three headers to be large, so it isn't gated
+behind an opt-in flag the way the rate limiter is. Setting it to `0` or
+negative is a startup error, since that would reject every `/ws` connection.
+`http.Server.MaxHeaderBytes` is additionally set to 16KB server-wide (all
+headers combined, all endpoints), well under Go's 1MB default, as a cheap
+first-line check before a request even reaches a handler.
 
 NOTE: If `MaxOpenConns(1)` ever shows up as a bottleneck, the alternative is
 WAL mode in the DSN, which allows one writer plus concurrent readers:

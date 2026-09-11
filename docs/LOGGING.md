@@ -43,6 +43,7 @@ tool parses log lines.
 
 | `reason` | Level | Where | Cause | Client sees |
 |---|---|---|---|---|
+| `header_too_large` | Warn | `preUpgradeCheck` | The `Cookie`, `Origin`, or `X-Forwarded-For` header exceeded `-max-header-value` bytes. Checked first, before the rate limiter or a token lookup. Logs the header name and length, never the value. | HTTP 431, no WS handshake. |
 | `rate_limit_ip` | Warn | `wsHandler` | Client IP exceeded `-rate-limit-ip` / `-rate-burst-ip`. | HTTP 429, no WS handshake. Close code 1006. |
 | `rate_limit_player` | Warn | `wsHandler` | Player exceeded `-rate-limit-player` / `-rate-burst-player`. | HTTP 429, no WS handshake. Close code 1006. |
 | `upgrade_failed` | Warn | `wsHandler` | HTTP upgrade itself failed: bad headers, bad `Sec-WebSocket-Version`, or origin rejected by `upgrader.CheckOrigin`. | Connection error, no WS handshake. |
@@ -53,10 +54,11 @@ tool parses log lines.
 | `client_data_frame` | Warn | `wsHandler` read loop | Client sent a data frame. The gateway never reads application data from players. | Close frame, code 1008, `"client messages not accepted"`. |
 | `token_not_found` | Info | `revalidateOnce` | Token was valid at connect time but is no longer in `ws_token`: the expiry sweep removed it, an admin revoked it, or the player was deleted and the FK cascade took their tokens. Carries `source=revalidation`. | Close frame, code 1008, `"token not found"`. |
 
-The two `rate_limit_*` reasons are the only ones rejected before the upgrade:
-nginx sees a real `429`, and the browser surfaces the failed handshake as
-close code 1006. `wsclient.js`'s existing `scheduleReconnect()` handles this
-by backing off exponentially, so no client change is needed.
+`header_too_large` and the two `rate_limit_*` reasons are the only ones
+rejected before the upgrade: nginx sees a real status code (`431` or `429`),
+and the browser surfaces the failed handshake as close code 1006.
+`wsclient.js`'s existing `scheduleReconnect()` handles this by backing off
+exponentially, so no client change is needed.
 
 `token_not_found` is the only non-Warn reason in this family. It fires as a
 routine consequence of revalidation doing its job. Every other reason
@@ -135,9 +137,18 @@ differ when a player has multiple open connections.
 | `ip` | `clientIP(r)` | The real client IP when `-trust-xff` is enabled and the server is behind a trusted proxy; otherwise the direct peer address. The port is stripped. |
 | `origin` | `Origin` header | Passed through by nginx unchanged; only trustworthy if the proxy strips it from clients. |
 | `xff` | `X-Forwarded-For` header | The raw header value, logged for diagnostics regardless of `-trust-xff`. |
+| `cookie` | `Cookie` header | The raw header value, unparsed (every cookie the client sent, semicolon-joined as the browser sent it). See "Known gaps": this can include the participantUI session cookie. Absent on `header_too_large` (see below). |
+
+`header_too_large` is the one `ws_reject` reason that does not carry
+`origin`/`xff`/`cookie`: it exists because one of those three is oversized,
+so the row that would normally hold it holds `header`/`len`/`max` instead
+(see below). It does still carry `ip`.
 
 **Additional fields on specific paths:**
 
+- `header`, `len`, `max` — present only on `header_too_large`: which of
+  `Cookie`/`Origin`/`X-Forwarded-For` was oversized, its actual length, and
+  the configured `-max-header-value`. Never the value itself.
 - `token` — the raw player token. Present on `invalid_token`,
   `token_check_failed`, `too_many_connections`, `client_data_frame`,
   `token_not_found`, `ws_connect`, `ws_disconnect`, and
@@ -239,3 +250,10 @@ reflects the rejection.
 - **`token` is logged raw.** Anyone with read access to the log can reuse the
   token until it expires or is revoked. If this is a concern, hash it before
   logging — the change is local to the call sites that log it.
+- **`cookie` is logged raw and unparsed, the whole header, every cookie the
+  client sent.** This is a bigger exposure than the token above: if the
+  browser sends its participantUI session cookie alongside the WS request
+  (same-site, same top-level domain), it lands in this log too, and reusing
+  it grants access to the website session, not just this gateway. If that's
+  a real concern, log only a specific cookie name instead of the whole
+  header, or drop this field and correlate some other way.

@@ -49,7 +49,10 @@ var (
 	rateBurstIP                int
 	rateLimitPlayer            int
 	rateBurstPlayer            int
+	rateLimitIPEnabled         bool
+	rateLimitPlayerEnabled     bool
 	trustXFF                   bool
+	maxHeaderValueLen          int
 )
 
 type wsConnection struct {
@@ -168,6 +171,9 @@ func clientIP(r *http.Request) string {
 }
 
 func allowIP(ip string) bool {
+	if !rateLimitIPEnabled {
+		return true
+	}
 	ipMu.Lock()
 	defer ipMu.Unlock()
 	e, ok := ipLimiters[ip]
@@ -182,6 +188,9 @@ func allowIP(ip string) bool {
 }
 
 func allowPlayer(playerID string) bool {
+	if !rateLimitPlayerEnabled {
+		return true
+	}
 	playerMu.Lock()
 	defer playerMu.Unlock()
 	e, ok := playerLimiters[playerID]
@@ -227,7 +236,11 @@ func startRateLimiterCleanup(stopCh <-chan struct{}) {
 // parseFlags parses command-line flags into global configuration variables.
 // It supports database driver, DSN, server address, log file/level/format, PID
 // file, WS server limits, and the /ws connection-attempt rate limiter.
-func parseFlags() {
+//
+// Rate limiting is opt-in: the limiter only turns on if the operator actually
+// passed one of the rate flags. Returns an error if a rate flag was passed
+// with a value that would make the limiter reject everything.
+func parseFlags() error {
 	var origins string
 
 	flag.StringVar(&dbDriver, "db", "sqlite", "Database driver")
@@ -242,17 +255,50 @@ func parseFlags() {
 	flag.IntVar(&maxConnectionsPerPlayer, "max-conns", 10, "Max concurrent WS connections per player")
 	flag.DurationVar(&tokenRevalidationPeriod, "revalidate-period", time.Minute, "Token revalidation interval")
 	flag.DurationVar(&offlineTTL, "offline-ttl", 10*time.Second, "Offline message TTL")
-	flag.IntVar(&rateLimitIP, "rate-limit-ip", 5, "WS connection attempts per second per client IP")
-	flag.IntVar(&rateBurstIP, "rate-burst-ip", 20, "WS connection attempt burst per client IP")
-	flag.IntVar(&rateLimitPlayer, "rate-limit-player", 2, "WS connection attempts per second per player")
-	flag.IntVar(&rateBurstPlayer, "rate-burst-player", 5, "WS connection attempt burst per player")
+	flag.IntVar(&rateLimitIP, "rate-limit-ip", 20, "WS connection attempts per second per client IP (disabled unless this or -rate-burst-ip is set)")
+	flag.IntVar(&rateBurstIP, "rate-burst-ip", 60, "WS connection attempt burst per client IP (disabled unless this or -rate-limit-ip is set)")
+	flag.IntVar(&rateLimitPlayer, "rate-limit-player", 3, "WS connection attempts per second per player (disabled unless this or -rate-burst-player is set)")
+	flag.IntVar(&rateBurstPlayer, "rate-burst-player", 10, "WS connection attempt burst per player (disabled unless this or -rate-limit-player is set)")
 	flag.BoolVar(&trustXFF, "trust-xff", false, "Trust X-Forwarded-For for client IP (only behind a trusted proxy)")
+	flag.IntVar(&maxHeaderValueLen, "max-header-value", 8192, "Max bytes for the Cookie, Origin, or X-Forwarded-For header on /ws; oversized values are rejected before any other work")
 	flag.BoolVar(&daemonize, "daemon", false, "")
 	flag.Parse()
 
 	if origins != "" {
 		allowedOrigins = strings.Split(origins, ",")
 	}
+
+	// flag.Visit only calls back for flags actually present on the command
+	// line, never for ones left at their zero-value default, so the limiter
+	// only turns on if the operator set it.
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "rate-limit-ip", "rate-burst-ip":
+			rateLimitIPEnabled = true
+		case "rate-limit-player", "rate-burst-player":
+			rateLimitPlayerEnabled = true
+		}
+	})
+
+	// rate.NewLimiter(0, 0) rejects every request. An operator passing 0 to
+	// a rate flag almost certainly meant "unlimited", which is what omitting
+	// the flag already does. Reject it so they find out at startup.
+	if rateLimitIPEnabled && (rateLimitIP <= 0 || rateBurstIP <= 0) {
+		return fmt.Errorf("rate limiting for IPs is enabled but -rate-limit-ip=%d and -rate-burst-ip=%d must both be > 0; omit the flags to disable",
+			rateLimitIP, rateBurstIP)
+	}
+	if rateLimitPlayerEnabled && (rateLimitPlayer <= 0 || rateBurstPlayer <= 0) {
+		return fmt.Errorf("rate limiting for players is enabled but -rate-limit-player=%d and -rate-burst-player=%d must both be > 0; omit the flags to disable",
+			rateLimitPlayer, rateBurstPlayer)
+	}
+	// Unlike the rate limiters, this one isn't opt-in: -max-header-value <= 0
+	// would reject every /ws connection outright, which is never what's
+	// meant, so it's a startup error rather than a silent lockout.
+	if maxHeaderValueLen <= 0 {
+		return fmt.Errorf("-max-header-value=%d must be > 0", maxHeaderValueLen)
+	}
+
+	return nil
 }
 
 // ///////////////////
@@ -420,59 +466,22 @@ func flushPendingMessages(playerID string, wc *wsConnection) {
 // tagged on the 101 response via X-WS-Reject, which nginx maps to a real status
 // code in the access log. The upgrade still completes and the client receives a
 // normal close frame, so browser-side code can still branch on the close code.
+//
+// The work is split across preUpgradeCheck (IP/player rate limits + token
+// validation), sendPostUpgradeReject (the token-related rejections that must
+// complete the upgrade first), checkConnectionLimit, and serveConnection (the
+// heartbeat + read loop once a connection is accepted), so this function is
+// just the sequence, not the logic.
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	ip := clientIP(r)
 
-	// IP rate limit, pre-auth.
-	if !allowIP(ip) {
-		logrus.WithFields(logrus.Fields{
-			"event":  "ws_reject",
-			"reason": "rate_limit_ip",
-			"ip":     ip,
-			"origin": r.Header.Get("Origin"),
-			"xff":    r.Header.Get("X-Forwarded-For"),
-		}).Warn("Connection rejected: IP rate limit")
-		w.Header().Set("Retry-After", "1")
-		http.Error(w, "rate limit", http.StatusTooManyRequests)
+	playerID, rejectReason, ok := preUpgradeCheck(w, r, ip, token)
+	if !ok {
+		// A real HTTP-level rejection (429) was already written.
 		return
 	}
 
-	// Validate before upgrade, but do not short-circuit: a rejection is
-	// signalled via X-WS-Reject on the 101 response plus a close frame.
-	var rejectReason string
-	var playerID string
-
-	if token == "" {
-		rejectReason = "missing_token"
-	} else {
-		var err error
-		playerID, err = validateToken(token, false)
-		if err != nil {
-			if errors.Is(err, ErrTokenNotFound) {
-				rejectReason = "invalid_token"
-			} else {
-				rejectReason = "token_check_failed"
-			}
-		}
-	}
-
-	// Player rate limit, post-auth. Only checked when the token was valid;
-	// an invalid token already rejected above.
-	if rejectReason == "" && !allowPlayer(playerID) {
-		logrus.WithFields(logrus.Fields{
-			"event":     "ws_reject",
-			"reason":    "rate_limit_player",
-			"player_id": playerID,
-			"token":     token,
-			"ip":        ip,
-			"origin":    r.Header.Get("Origin"),
-			"xff":       r.Header.Get("X-Forwarded-For"),
-		}).Warn("Connection rejected: player rate limit")
-		w.Header().Set("Retry-After", "1")
-		http.Error(w, "rate limit", http.StatusTooManyRequests)
-		return
-	}
 	// Response headers for the 101. X-WS-Reject is only set when the
 	// connection will be closed immediately after the upgrade; nginx maps
 	// it to a real status code in the access log.
@@ -483,85 +492,22 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := upgrader.Upgrade(w, r, respHeader)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"event":  "ws_reject",
-			"reason": "upgrade_failed",
-			"token":  token,
-			"err":    err.Error(),
-			"ip":     ip,
-			"origin": r.Header.Get("Origin"),
-			"xff":    r.Header.Get("X-Forwarded-For"),
-		}).Warn("Connection rejected: upgrade failed")
+		logReject(r, ip, "upgrade_failed", logrus.Fields{"token": token, "err": err.Error()},
+			"Connection rejected: upgrade failed")
 		return
 	}
 
 	// If validation failed, log the rejection and close the upgraded socket.
 	// Client sees a normal close frame, not an HTTP-level error.
 	if rejectReason != "" {
-		switch rejectReason {
-		case "missing_token":
-			logrus.WithFields(logrus.Fields{
-				"event":  "ws_reject",
-				"reason": "missing_token",
-				"ip":     ip,
-				"origin": r.Header.Get("Origin"),
-				"xff":    r.Header.Get("X-Forwarded-For"),
-			}).Warn("Connection rejected: missing token")
-			_ = conn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "missing token"))
-
-		case "invalid_token":
-			logrus.WithFields(logrus.Fields{
-				"event":  "ws_reject",
-				"reason": "invalid_token",
-				"token":  token,
-				"ip":     ip,
-				"origin": r.Header.Get("Origin"),
-				"xff":    r.Header.Get("X-Forwarded-For"),
-			}).Warn("Connection rejected: invalid token")
-			_ = conn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "invalid token"))
-
-		case "token_check_failed":
-			logrus.WithFields(logrus.Fields{
-				"event":  "ws_reject",
-				"reason": "token_check_failed",
-				"token":  token,
-				"ip":     ip,
-				"origin": r.Header.Get("Origin"),
-				"xff":    r.Header.Get("X-Forwarded-For"),
-			}).Warn("Connection rejected: token check failed")
-			_ = conn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "token check failed"))
-		}
-
-		_ = conn.Close()
+		sendPostUpgradeReject(conn, r, ip, token, rejectReason)
 		return
 	}
 
-	// check connection limit
-	mu.Lock()
-	current := len(players[playerID])
-	if current >= maxConnectionsPerPlayer {
-		mu.Unlock()
-		logrus.WithFields(logrus.Fields{
-			"event":     "ws_reject",
-			"reason":    "too_many_connections",
-			"player_id": playerID,
-			"token":     token,
-			"current":   current,
-			"limit":     maxConnectionsPerPlayer,
-			"ip":        ip,
-			"origin":    r.Header.Get("Origin"),
-			"xff":       r.Header.Get("X-Forwarded-For"),
-		}).Warn("Connection rejected: too many connections")
-		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "too many connections"))
-		_ = conn.Close()
+	if !checkConnectionLimit(conn, r, ip, token, playerID) {
 		return
 	}
-	mu.Unlock()
 
-	// register connection with token
 	wc := registerConnection(playerID, conn, token)
 	defer unregisterConnection(playerID, conn)
 
@@ -573,9 +519,189 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		"ip":        ip,
 		"origin":    r.Header.Get("Origin"),
 		"xff":       r.Header.Get("X-Forwarded-For"),
+		"cookie":    r.Header.Get("Cookie"),
 	}).Info("Player connected")
 
-	// heartbeat
+	serveConnection(wc, conn, playerID, token, ip, r)
+}
+
+// logReject logs a ws_reject line with the fields every rejection carries
+// (ip/origin/xff/cookie) merged with reason-specific fields. extra may be
+// nil. Not used for header_too_large: that reason exists specifically
+// because one of those header values is oversized, so logging it raw here
+// would defeat the point. See rejectOversizedHeader.
+func logReject(r *http.Request, ip, reason string, extra logrus.Fields, msg string) {
+	fields := logrus.Fields{
+		"event":  "ws_reject",
+		"reason": reason,
+		"ip":     ip,
+		"origin": r.Header.Get("Origin"),
+		"xff":    r.Header.Get("X-Forwarded-For"),
+		"cookie": r.Header.Get("Cookie"),
+	}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	logrus.WithFields(fields).Warn(msg)
+}
+
+// oversizedHeader returns the name of the first of Cookie, Origin, or
+// X-Forwarded-For whose value exceeds maxHeaderValueLen bytes, or "" if all
+// three are within bounds.
+//
+// This is a per-value cap, separate from and much tighter than
+// http.Server's own MaxHeaderBytes (which only bounds the sum of every
+// header on the request combined, see buildServer). It exists because
+// these three specific values get logged raw on every ws_reject/ws_connect/
+// ws_disconnect line: without this check, a single client could force
+// every log line for its connection to carry a multi-hundred-KB value.
+func oversizedHeader(r *http.Request) string {
+	for _, name := range []string{"Cookie", "Origin", "X-Forwarded-For"} {
+		if len(r.Header.Get(name)) > maxHeaderValueLen {
+			return name
+		}
+	}
+	return ""
+}
+
+// rejectOversizedHeader logs and responds to a request that failed
+// oversizedHeader's check. It logs the offending header's name and length
+// only, never its value, since the value being oversized is the whole
+// reason this exists.
+func rejectOversizedHeader(w http.ResponseWriter, r *http.Request, ip, header string) {
+	logrus.WithFields(logrus.Fields{
+		"event":  "ws_reject",
+		"reason": "header_too_large",
+		"ip":     ip,
+		"header": header,
+		"len":    len(r.Header.Get(header)),
+		"max":    maxHeaderValueLen,
+	}).Warn("Connection rejected: header too large")
+	http.Error(w, "header too large", http.StatusRequestHeaderFieldsTooLarge)
+}
+
+// preUpgradeCheck runs every check that must happen before the HTTP response
+// is committed: header size limits, the IP rate limit, token validation, and
+// the player rate limit (checked only once the token is known valid).
+//
+// ok=false means a real HTTP-level rejection (429 or 431) has already been
+// written and the caller must not call Upgrade(). ok=true with rejectReason
+// set means the caller should still complete the upgrade and reject via a
+// close frame instead (see wsHandler's doc comment for why). ok=true with
+// rejectReason empty means proceed normally.
+func preUpgradeCheck(w http.ResponseWriter, r *http.Request, ip, token string) (playerID, rejectReason string, ok bool) {
+	// Checked first and before anything else, including the rate limiter:
+	// it's the cheapest possible rejection, and every other rejection path
+	// below logs Cookie/Origin/X-Forwarded-For raw, which is exactly what
+	// this is guarding against.
+	if h := oversizedHeader(r); h != "" {
+		rejectOversizedHeader(w, r, ip, h)
+		return "", "", false
+	}
+
+	if !allowIP(ip) {
+		logReject(r, ip, "rate_limit_ip", nil, "Connection rejected: IP rate limit")
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return "", "", false
+	}
+
+	if token == "" {
+		return "", "missing_token", true
+	}
+
+	var err error
+	playerID, err = validateToken(token, false)
+	if err != nil {
+		if errors.Is(err, ErrTokenNotFound) {
+			return "", "invalid_token", true
+		}
+		return "", "token_check_failed", true
+	}
+
+	if !allowPlayer(playerID) {
+		logReject(r, ip, "rate_limit_player", logrus.Fields{"player_id": playerID, "token": token},
+			"Connection rejected: player rate limit")
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "rate limit", http.StatusTooManyRequests)
+		return "", "", false
+	}
+
+	return playerID, "", true
+}
+
+// postUpgradeReject describes how to close a connection for one of the
+// rejectReason values that can only be signalled after the upgrade
+// completes. tokenInLog controls whether the token is included in the log
+// line, matching LOGGING.md (absent for missing_token, present otherwise).
+type postUpgradeReject struct {
+	closeCode  int
+	closeMsg   string
+	logMsg     string
+	tokenInLog bool
+}
+
+var postUpgradeRejects = map[string]postUpgradeReject{
+	"missing_token": {
+		closeCode: websocket.ClosePolicyViolation,
+		closeMsg:  "missing token",
+		logMsg:    "Connection rejected: missing token",
+	},
+	"invalid_token": {
+		closeCode:  websocket.ClosePolicyViolation,
+		closeMsg:   "invalid token",
+		logMsg:     "Connection rejected: invalid token",
+		tokenInLog: true,
+	},
+	"token_check_failed": {
+		closeCode:  websocket.CloseTryAgainLater,
+		closeMsg:   "token check failed",
+		logMsg:     "Connection rejected: token check failed",
+		tokenInLog: true,
+	},
+}
+
+// sendPostUpgradeReject logs and closes an already-upgraded connection for
+// one of the postUpgradeRejects reasons.
+func sendPostUpgradeReject(conn *websocket.Conn, r *http.Request, ip, token, reason string) {
+	spec := postUpgradeRejects[reason]
+
+	var extra logrus.Fields
+	if spec.tokenInLog {
+		extra = logrus.Fields{"token": token}
+	}
+	logReject(r, ip, reason, extra, spec.logMsg)
+
+	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(spec.closeCode, spec.closeMsg))
+	_ = conn.Close()
+}
+
+// checkConnectionLimit reports whether playerID is under maxConnectionsPerPlayer.
+// On the limit being hit, it logs the rejection and closes conn itself.
+func checkConnectionLimit(conn *websocket.Conn, r *http.Request, ip, token, playerID string) bool {
+	mu.Lock()
+	current := len(players[playerID])
+	mu.Unlock()
+
+	if current < maxConnectionsPerPlayer {
+		return true
+	}
+
+	logReject(r, ip, "too_many_connections", logrus.Fields{
+		"player_id": playerID,
+		"token":     token,
+		"current":   current,
+		"limit":     maxConnectionsPerPlayer,
+	}, "Connection rejected: too many connections")
+	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "too many connections"))
+	_ = conn.Close()
+	return false
+}
+
+// serveConnection runs an accepted, registered connection until it closes:
+// heartbeat ping/pong, and a read loop that rejects any client-sent data
+// frame (players are not allowed to send us application data).
+func serveConnection(wc *wsConnection, conn *websocket.Conn, playerID, token, ip string, r *http.Request) {
 	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetReadLimit(256)
 	conn.SetPongHandler(func(string) error {
@@ -601,7 +727,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// main read loop
 	for {
 		mt, _, err := conn.ReadMessage()
 		if err != nil {
@@ -609,16 +734,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		// Clients are not allowed to send data; only control frames are expected.
 		_ = wc.writeClose(websocket.ClosePolicyViolation, "client messages not accepted")
-		logrus.WithFields(logrus.Fields{
-			"event":     "ws_reject",
-			"reason":    "client_data_frame",
+		logReject(r, ip, "client_data_frame", logrus.Fields{
 			"player_id": playerID,
 			"token":     token,
 			"type":      mt,
-			"ip":        ip,
-			"origin":    r.Header.Get("Origin"),
-			"xff":       r.Header.Get("X-Forwarded-For"),
-		}).Warn("Client sent unexpected message, closing")
+		}, "Client sent unexpected message, closing")
 		break
 	}
 
@@ -629,6 +749,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		"ip":        ip,
 		"origin":    r.Header.Get("Origin"),
 		"xff":       r.Header.Get("X-Forwarded-For"),
+		"cookie":    r.Header.Get("Cookie"),
 	}).Info("Player disconnected")
 }
 
@@ -827,6 +948,13 @@ func buildServer() *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// Go defaults this to 1MB (DefaultMaxHeaderBytes) for every header
+		// on the request combined, which is far more than anything here
+		// legitimately needs. This bounds it before the request even
+		// reaches a handler; oversizedHeader (in preUpgradeCheck) is the
+		// separate, tighter, per-value check on Cookie/Origin/XFF that this
+		// doesn't replace.
+		MaxHeaderBytes: 16 << 10, // 16KB
 	}
 }
 
@@ -1116,7 +1244,9 @@ func main() {
 }
 
 func run() error {
-	parseFlags()
+	if err := parseFlags(); err != nil {
+		return err
+	}
 
 	// Daemonize first: the parent exits before touching the PID file,
 	// log file, or DB, so the child owns all of those resources.

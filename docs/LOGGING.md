@@ -239,6 +239,27 @@ location /ws {
 rejected before the upgrade with a real HTTP `429`, so `$status` already
 reflects the rejection.
 
+### Identifying the player in the access log
+
+`ws-server` also sets `X-Player-Uid` on the `101` whenever a token resolved
+to a real player, whether the connection is then accepted or closed right
+after for `too_many_connections` (which has no `X-WS-Reject` value of its
+own, see the reasons table). It's absent on every reason rejected before a
+`101` is ever sent (`rate_limit_ip`, `rate_limit_player`, `header_too_large`,
+plain HTTP errors, no upgrade headers to set at all), and on the three that
+do complete the upgrade but never resolved a player (`missing_token`,
+`invalid_token`, `token_check_failed`).
+
+Add it to the same `log_format` used above:
+
+```nginx
+log_format ws '$remote_addr - $remote_user [$time_local] '
+              '"$request" $ws_logged_status $body_bytes_sent '
+              '"$http_referer" "$http_user_agent" '
+              'reject=$upstream_http_x_ws_reject '
+              'player=$upstream_http_x_player_uid';
+```
+
 ## Known gaps
 
 - **`token_not_found` and `ws_token_check` do not carry `origin` / `xff` /

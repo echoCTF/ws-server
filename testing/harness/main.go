@@ -126,13 +126,15 @@ func runCore() []result {
 	var res []result
 
 	// 1. Missing token: expect close code 1008 "missing token", header
-	// X-WS-Reject: missing_token, and no "token" field is asserted here
-	// since we can't see server logs from the client, that's diffed
-	// separately from the captured log files.
+	// X-WS-Reject: missing_token, no X-Player-Uid (nothing was resolved),
+	// and no "token" field is asserted here since we can't see server logs
+	// from the client, that's diffed separately from the captured log
+	// files.
 	{
 		conn, httpResp, err := dialWS("__omit__")
-		pass := err == nil && httpResp != nil && httpResp.Header.Get("X-WS-Reject") == "missing_token"
-		detail := fmt.Sprintf("dial err=%v X-WS-Reject=%q", err, headerOrNil(httpResp))
+		pass := err == nil && httpResp != nil && httpResp.Header.Get("X-WS-Reject") == "missing_token" &&
+			httpResp.Header.Get("X-Player-Uid") == ""
+		detail := fmt.Sprintf("dial err=%v X-WS-Reject=%q X-Player-Uid=%q", err, headerOrNil(httpResp), playerUIDOrNil(httpResp))
 		if pass {
 			code, reason := expectClose(conn, 3*time.Second)
 			pass = code == websocket.ClosePolicyViolation && reason == "missing token"
@@ -142,11 +144,13 @@ func runCore() []result {
 		res = add(res, "ws_missing_token", pass, detail)
 	}
 
-	// 2. Invalid token: expect close code 1008 "invalid token".
+	// 2. Invalid token: expect close code 1008 "invalid token", no
+	// X-Player-Uid (the token never resolved to a player).
 	{
 		conn, httpResp, err := dialWS("this-token-does-not-exist")
-		pass := err == nil && httpResp != nil && httpResp.Header.Get("X-WS-Reject") == "invalid_token"
-		detail := fmt.Sprintf("dial err=%v X-WS-Reject=%q", err, headerOrNil(httpResp))
+		pass := err == nil && httpResp != nil && httpResp.Header.Get("X-WS-Reject") == "invalid_token" &&
+			httpResp.Header.Get("X-Player-Uid") == ""
+		detail := fmt.Sprintf("dial err=%v X-WS-Reject=%q X-Player-Uid=%q", err, headerOrNil(httpResp), playerUIDOrNil(httpResp))
 		if pass {
 			code, reason := expectClose(conn, 3*time.Second)
 			pass = code == websocket.ClosePolicyViolation && reason == "invalid token"
@@ -156,11 +160,14 @@ func runCore() []result {
 		res = add(res, "ws_invalid_token", pass, detail)
 	}
 
-	// 3. Valid token: expect a clean upgrade, no immediate close.
+	// 3. Valid token: expect a clean upgrade, no immediate close, and
+	// X-Player-Uid set to the token's resolved player_id (1, for
+	// player-token-1 per the fixture).
 	{
 		conn, httpResp, err := dialWS("player-token-1")
-		pass := err == nil && httpResp != nil && httpResp.Header.Get("X-WS-Reject") == ""
-		detail := fmt.Sprintf("dial err=%v status=%v", err, statusOrNil(httpResp))
+		pass := err == nil && httpResp != nil && httpResp.Header.Get("X-WS-Reject") == "" &&
+			httpResp.Header.Get("X-Player-Uid") == "1"
+		detail := fmt.Sprintf("dial err=%v status=%v X-Player-Uid=%q", err, statusOrNil(httpResp), playerUIDOrNil(httpResp))
 		if pass {
 			conn.Close()
 		}
@@ -431,6 +438,13 @@ func headerOrNil(r *http.Response) string {
 		return "<nil resp>"
 	}
 	return r.Header.Get("X-WS-Reject")
+}
+
+func playerUIDOrNil(r *http.Response) string {
+	if r == nil {
+		return "<nil resp>"
+	}
+	return r.Header.Get("X-Player-Uid")
 }
 
 func statusOrNil(r *http.Response) interface{} {

@@ -484,10 +484,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Response headers for the 101. X-WS-Reject is only set when the
 	// connection will be closed immediately after the upgrade; nginx maps
-	// it to a real status code in the access log.
+	// it to a real status code in the access log. X-Player-Uid is set
+	// whenever a token resolved to a real player, rejected-after-upgrade
+	// or not, so nginx's access log can show who without needing the app
+	// log. player_id only ever contains the ws_token.player_id column
+	// (INT UNSIGNED), so it's always a plain digit string, no escaping to
+	// worry about.
 	respHeader := http.Header{}
 	if rejectReason != "" {
 		respHeader.Set("X-WS-Reject", rejectReason)
+	} else {
+		respHeader.Set("X-Player-Uid", playerID)
 	}
 
 	conn, err := upgrader.Upgrade(w, r, respHeader)

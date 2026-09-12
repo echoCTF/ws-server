@@ -55,6 +55,24 @@ var (
 	maxHeaderValueLen          int
 )
 
+// Log field names and event-name values that repeat across many
+// logrus.Fields{} literals. Named here once so a rename only touches one
+// place (and so goconst doesn't flag the duplication).
+const (
+	fieldEvent     = "event"
+	fieldReason    = "reason"
+	fieldToken     = "token"
+	fieldPlayerID  = "player_id"
+	fieldAppEvent  = "app_event"
+	fieldOrigin    = "origin"
+	fieldXFF       = "xff"
+	fieldCookie    = "cookie"
+	fieldSubjectID = "subject_id"
+
+	eventWSDeliver = "ws_deliver"
+	eventWSReject  = "ws_reject"
+)
+
 type wsConnection struct {
 	conn  *websocket.Conn
 	token string
@@ -378,10 +396,10 @@ func validateToken(token string, isServer bool) (string, error) {
 		return "", ErrTokenNotFound
 	}
 	logrus.WithFields(logrus.Fields{
-		"event":  "ws_token_check",
-		"reason": "db_error",
-		"token":  token,
-		"err":    err.Error(),
+		fieldEvent:  "ws_token_check",
+		fieldReason: "db_error",
+		fieldToken:  token,
+		"err":       err.Error(),
 	}).Warn("Token validation failed: database error")
 	return "", err
 }
@@ -444,12 +462,12 @@ func flushPendingMessages(playerID string, wc *wsConnection) {
 				_ = wc.writeJSON(pm.msg)
 				messagesDelivered.Inc()
 				logrus.WithFields(logrus.Fields{
-					"event":     "ws_deliver",
-					"reason":    "offline_flush",
-					"player_id": playerID,
-					"app_event": pm.msg.Event,
-					"queued_at": pm.timestamp,
-					"age_ms":    time.Since(pm.timestamp).Milliseconds(),
+					fieldEvent:    eventWSDeliver,
+					fieldReason:   "offline_flush",
+					fieldPlayerID: playerID,
+					fieldAppEvent: pm.msg.Event,
+					"queued_at":   pm.timestamp,
+					"age_ms":      time.Since(pm.timestamp).Milliseconds(),
 				}).Info("Delivered queued WS message")
 			}
 		}
@@ -499,7 +517,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := upgrader.Upgrade(w, r, respHeader)
 	if err != nil {
-		logReject(r, ip, "upgrade_failed", logrus.Fields{"token": token, "err": err.Error()},
+		logReject(r, ip, "upgrade_failed", logrus.Fields{fieldToken: token, "err": err.Error()},
 			"Connection rejected: upgrade failed")
 		return
 	}
@@ -519,14 +537,14 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	defer unregisterConnection(playerID, conn)
 
 	logrus.WithFields(logrus.Fields{
-		"event":     "ws_connect",
-		"reason":    "accepted",
-		"player_id": playerID,
-		"token":     token,
-		"ip":        ip,
-		"origin":    r.Header.Get("Origin"),
-		"xff":       r.Header.Get("X-Forwarded-For"),
-		"cookie":    r.Header.Get("Cookie"),
+		fieldEvent:    "ws_connect",
+		fieldReason:   "accepted",
+		fieldPlayerID: playerID,
+		fieldToken:    token,
+		"ip":          ip,
+		fieldOrigin:   r.Header.Get("Origin"),
+		fieldXFF:      r.Header.Get("X-Forwarded-For"),
+		fieldCookie:   r.Header.Get("Cookie"),
 	}).Info("Player connected")
 
 	serveConnection(wc, conn, playerID, token, ip, r)
@@ -539,12 +557,12 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 // would defeat the point. See rejectOversizedHeader.
 func logReject(r *http.Request, ip, reason string, extra logrus.Fields, msg string) {
 	fields := logrus.Fields{
-		"event":  "ws_reject",
-		"reason": reason,
-		"ip":     ip,
-		"origin": r.Header.Get("Origin"),
-		"xff":    r.Header.Get("X-Forwarded-For"),
-		"cookie": r.Header.Get("Cookie"),
+		fieldEvent:  eventWSReject,
+		fieldReason: reason,
+		"ip":        ip,
+		fieldOrigin: r.Header.Get("Origin"),
+		fieldXFF:    r.Header.Get("X-Forwarded-For"),
+		fieldCookie: r.Header.Get("Cookie"),
 	}
 	for k, v := range extra {
 		fields[k] = v
@@ -577,12 +595,12 @@ func oversizedHeader(r *http.Request) string {
 // reason this exists.
 func rejectOversizedHeader(w http.ResponseWriter, r *http.Request, ip, header string) {
 	logrus.WithFields(logrus.Fields{
-		"event":  "ws_reject",
-		"reason": "header_too_large",
-		"ip":     ip,
-		"header": header,
-		"len":    len(r.Header.Get(header)),
-		"max":    maxHeaderValueLen,
+		fieldEvent:  eventWSReject,
+		fieldReason: "header_too_large",
+		"ip":        ip,
+		"header":    header,
+		"len":       len(r.Header.Get(header)),
+		"max":       maxHeaderValueLen,
 	}).Warn("Connection rejected: header too large")
 	http.Error(w, "header too large", http.StatusRequestHeaderFieldsTooLarge)
 }
@@ -627,7 +645,7 @@ func preUpgradeCheck(w http.ResponseWriter, r *http.Request, ip, token string) (
 	}
 
 	if !allowPlayer(playerID) {
-		logReject(r, ip, "rate_limit_player", logrus.Fields{"player_id": playerID, "token": token},
+		logReject(r, ip, "rate_limit_player", logrus.Fields{fieldPlayerID: playerID, fieldToken: token},
 			"Connection rejected: player rate limit")
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "rate limit", http.StatusTooManyRequests)
@@ -675,7 +693,7 @@ func sendPostUpgradeReject(conn *websocket.Conn, r *http.Request, ip, token, rea
 
 	var extra logrus.Fields
 	if spec.tokenInLog {
-		extra = logrus.Fields{"token": token}
+		extra = logrus.Fields{fieldToken: token}
 	}
 	logReject(r, ip, reason, extra, spec.logMsg)
 
@@ -695,10 +713,10 @@ func checkConnectionLimit(conn *websocket.Conn, r *http.Request, ip, token, play
 	}
 
 	logReject(r, ip, "too_many_connections", logrus.Fields{
-		"player_id": playerID,
-		"token":     token,
-		"current":   current,
-		"limit":     maxConnectionsPerPlayer,
+		fieldPlayerID: playerID,
+		fieldToken:    token,
+		"current":     current,
+		"limit":       maxConnectionsPerPlayer,
 	}, "Connection rejected: too many connections")
 	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "too many connections"))
 	_ = conn.Close()
@@ -734,29 +752,31 @@ func serveConnection(wc *wsConnection, conn *websocket.Conn, playerID, token, ip
 		}
 	}()
 
-	for {
-		mt, _, err := conn.ReadMessage()
-		if err != nil {
-			break
-		}
+	// A single call is all this ever does: ReadMessage blocks until either
+	// an error (client closed, network error, or the read deadline expiring
+	// when a pong doesn't arrive in time) or a genuine data frame, and a
+	// data frame is itself grounds to close, so there's never a need for a
+	// second read. Written straight-line rather than as a for-loop that
+	// always exits on its first pass (staticcheck SA4004).
+	mt, _, err := conn.ReadMessage()
+	if err == nil {
 		// Clients are not allowed to send data; only control frames are expected.
 		_ = wc.writeClose(websocket.ClosePolicyViolation, "client messages not accepted")
 		logReject(r, ip, "client_data_frame", logrus.Fields{
-			"player_id": playerID,
-			"token":     token,
-			"type":      mt,
+			fieldPlayerID: playerID,
+			fieldToken:    token,
+			"type":        mt,
 		}, "Client sent unexpected message, closing")
-		break
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"player_id": playerID,
-		"token":     token,
-		"event":     "ws_disconnect",
-		"ip":        ip,
-		"origin":    r.Header.Get("Origin"),
-		"xff":       r.Header.Get("X-Forwarded-For"),
-		"cookie":    r.Header.Get("Cookie"),
+		fieldPlayerID: playerID,
+		fieldToken:    token,
+		fieldEvent:    "ws_disconnect",
+		"ip":          ip,
+		fieldOrigin:   r.Header.Get("Origin"),
+		fieldXFF:      r.Header.Get("X-Forwarded-For"),
+		fieldCookie:   r.Header.Get("Cookie"),
 	}).Info("Player disconnected")
 }
 
@@ -795,11 +815,11 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 
 	if numConns == 0 {
 		logrus.WithFields(logrus.Fields{
-			"event":      "ws_queue",
-			"reason":     "queued",
-			"subject_id": subjectID,
-			"player_id":  msg.PlayerID,
-			"app_event":  msg.Event,
+			fieldEvent:     "ws_queue",
+			fieldReason:    "queued",
+			fieldSubjectID: subjectID,
+			fieldPlayerID:  msg.PlayerID,
+			fieldAppEvent:  msg.Event,
 		}).Info("Player not connected, queueing message")
 
 		pendingMu.Lock()
@@ -807,11 +827,11 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		if len(queue) >= maxQueuedMessagesPerPlayer {
 			queue = queue[1:]
 			logrus.WithFields(logrus.Fields{
-				"event":     "ws_queue",
-				"reason":    "queue_overflow",
-				"player_id": msg.PlayerID,
-				"app_event": msg.Event,
-				"limit":     maxQueuedMessagesPerPlayer,
+				fieldEvent:    "ws_queue",
+				fieldReason:   "queue_overflow",
+				fieldPlayerID: msg.PlayerID,
+				fieldAppEvent: msg.Event,
+				"limit":       maxQueuedMessagesPerPlayer,
 			}).Warn("Offline queue full, dropping oldest message")
 		}
 		pendingMessages[msg.PlayerID] = append(queue, pendingMessage{msg: wsMsg, timestamp: time.Now()})
@@ -822,12 +842,12 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 			messagesDelivered.Inc()
 		}
 		logrus.WithFields(logrus.Fields{
-			"event":       "ws_deliver",
-			"reason":      "live",
-			"subject_id":  subjectID,
-			"player_id":   msg.PlayerID,
-			"app_event":   msg.Event,
-			"connections": numConns,
+			fieldEvent:     eventWSDeliver,
+			fieldReason:    "live",
+			fieldSubjectID: subjectID,
+			fieldPlayerID:  msg.PlayerID,
+			fieldAppEvent:  msg.Event,
+			"connections":  numConns,
 		}).Info("Message delivered to player")
 	}
 	mu.Unlock()
@@ -876,12 +896,12 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 			delivered++
 		}
 		logrus.WithFields(logrus.Fields{
-			"event":      "ws_deliver",
-			"reason":     "broadcast_player",
-			"subject_id": subjectID,
-			"player_id":  *req.PlayerID,
-			"app_event":  req.Event,
-			"delivered":  delivered,
+			fieldEvent:     eventWSDeliver,
+			fieldReason:    "broadcast_player",
+			fieldSubjectID: subjectID,
+			fieldPlayerID:  *req.PlayerID,
+			fieldAppEvent:  req.Event,
+			"delivered":    delivered,
 		}).Info("Broadcast delivered to player")
 	} else {
 		for _, conns := range players {
@@ -892,11 +912,11 @@ func broadcastHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		logrus.WithFields(logrus.Fields{
-			"event":      "ws_deliver",
-			"reason":     "broadcast_all",
-			"subject_id": subjectID,
-			"app_event":  req.Event,
-			"delivered":  delivered,
+			fieldEvent:     eventWSDeliver,
+			fieldReason:    "broadcast_all",
+			fieldSubjectID: subjectID,
+			fieldAppEvent:  req.Event,
+			"delivered":    delivered,
 		}).Info("Broadcast delivered to all players")
 	}
 
@@ -1072,11 +1092,11 @@ func revalidateOnce() {
 			continue
 		}
 		logrus.WithFields(logrus.Fields{
-			"event":     "ws_reject",
-			"reason":    "token_not_found",
-			"player_id": e.playerID,
-			"token":     e.token,
-			"source":    "revalidation",
+			fieldEvent:    eventWSReject,
+			fieldReason:   "token_not_found",
+			fieldPlayerID: e.playerID,
+			fieldToken:    e.token,
+			"source":      "revalidation",
 		}).Info("Closing connection: token not found")
 		_ = wc.writeClose(websocket.ClosePolicyViolation, "token not found")
 		_ = wc.conn.Close()
@@ -1093,8 +1113,8 @@ func revalidateOnce() {
 	elapsed := time.Since(start).Milliseconds()
 	if backendErrors > 0 {
 		logrus.WithFields(logrus.Fields{
-			"event":          "ws_revalidate",
-			"reason":         "sweep_backend_errors",
+			fieldEvent:       "ws_revalidate",
+			fieldReason:      "sweep_backend_errors",
 			"checked":        checked,
 			"closed":         closed,
 			"backend_errors": backendErrors,
@@ -1102,8 +1122,8 @@ func revalidateOnce() {
 		}).Warn("Token revalidation sweep completed with DB errors")
 	} else {
 		logrus.WithFields(logrus.Fields{
-			"event":       "ws_revalidate",
-			"reason":      "sweep_completed",
+			fieldEvent:    "ws_revalidate",
+			fieldReason:   "sweep_completed",
 			"checked":     checked,
 			"closed":      closed,
 			"duration_ms": elapsed,

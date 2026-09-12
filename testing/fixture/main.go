@@ -8,6 +8,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// farFutureExpiry is the expires_at used by every fixture row except the
+// deliberately-expired one; validateToken doesn't check it anyway (see
+// main.go), it just needs to be a valid, non-past-looking datetime.
+const farFutureExpiry = "2099-01-01 00:00:00"
+
 // Builds a ws_token sqlite DB with a fixed, disjoint set of fixture rows so
 // each test scenario has its own token/player and none interfere with each
 // other's connection-count state. Identical rows are used for both the old
@@ -29,14 +34,14 @@ func main() {
 		isServer       int
 		expires        string
 	}{
-		{"player-token-1", "player-1", intp(1), 0, "2099-01-01 00:00:00"}, // solo connect + client-data-frame test
-		{"player-token-2", "player-2", intp(2), 0, "2099-01-01 00:00:00"}, // max-conns test, exclusive use
-		{"player-token-3", "player-3", intp(3), 0, "2099-01-01 00:00:00"}, // publish-to-online test
-		{"player-token-4", "player-4", intp(4), 0, "2099-01-01 00:00:00"}, // broadcast-all participant A
-		{"player-token-5", "player-5", intp(5), 0, "2099-01-01 00:00:00"}, // broadcast-all participant B
-		{"player-token-6", "player-6", intp(6), 0, "2099-01-01 00:00:00"}, // offline publish then connect+flush
-		{"player-token-7", "player-7", intp(7), 0, "2099-01-01 00:00:00"}, // broadcast to specific offline player, never connects
-		{"server-token-1", "server-1", nil, 1, "2099-01-01 00:00:00"},
+		{"player-token-1", "player-1", intp(1), 0, farFutureExpiry}, // solo connect + client-data-frame test
+		{"player-token-2", "player-2", intp(2), 0, farFutureExpiry}, // max-conns test, exclusive use
+		{"player-token-3", "player-3", intp(3), 0, farFutureExpiry}, // publish-to-online test
+		{"player-token-4", "player-4", intp(4), 0, farFutureExpiry}, // broadcast-all participant A
+		{"player-token-5", "player-5", intp(5), 0, farFutureExpiry}, // broadcast-all participant B
+		{"player-token-6", "player-6", intp(6), 0, farFutureExpiry}, // offline publish then connect+flush
+		{"player-token-7", "player-7", intp(7), 0, farFutureExpiry}, // broadcast to specific offline player, never connects
+		{"server-token-1", "server-1", nil, 1, farFutureExpiry},
 		{"expired-player-token", "player-99", intp(99), 0, "2000-01-01 00:00:00"}, // expires_at in the past
 	}
 

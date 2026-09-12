@@ -27,6 +27,7 @@ type result struct {
 }
 
 const headerAuthorization = "Authorization"
+const headerContentType = "Content-Type"
 
 // bearerServerToken is the fixture's server-token-1 row, wrapped in the
 // Bearer scheme /publish and /broadcast expect.
@@ -280,7 +281,7 @@ func scenarioPublishDeliversToOnlinePlayer() result {
 	if pass {
 		time.Sleep(100 * time.Millisecond) // let registerConnection land
 		resp, body := httpPost("/publish",
-			map[string]string{headerAuthorization: bearerServerToken, "Content-Type": "application/json"},
+			map[string]string{headerAuthorization: bearerServerToken, headerContentType: "application/json"},
 			`{"player_id":"3","event":"notify","payload":{"x":1}}`)
 		pass = resp != nil && resp.StatusCode == 200
 		detail = fmt.Sprintf("publish status=%v body=%q", statusOrNil(resp), body)
@@ -300,7 +301,7 @@ func scenarioPublishDeliversToOnlinePlayer() result {
 // queues it, then connecting within offline-ttl flushes it.
 func scenarioPublishQueuesThenFlushesOffline() result {
 	resp, body := httpPost("/publish",
-		map[string]string{headerAuthorization: bearerServerToken, "Content-Type": "application/json"},
+		map[string]string{headerAuthorization: bearerServerToken, headerContentType: "application/json"},
 		`{"player_id":"6","event":"queued_notify","payload":{"y":2}}`)
 	pass := resp != nil && resp.StatusCode == 200
 	detail := fmt.Sprintf("publish status=%v body=%q", statusOrNil(resp), body)
@@ -338,7 +339,7 @@ func scenarioPublishBadServerToken403() result {
 // scenarioPublishBadBody400: publish with malformed JSON body: 400.
 func scenarioPublishBadBody400() result {
 	resp, _ := httpPost("/publish",
-		map[string]string{headerAuthorization: bearerServerToken, "Content-Type": "application/json"},
+		map[string]string{headerAuthorization: bearerServerToken, headerContentType: "application/json"},
 		`{not json`)
 	pass := resp != nil && resp.StatusCode == 400
 	return result{"publish_bad_body_400", pass, fmt.Sprintf("status=%v", statusOrNil(resp))}
@@ -354,7 +355,7 @@ func scenarioBroadcastAllReachesEveryConnection() result {
 	if pass {
 		time.Sleep(100 * time.Millisecond)
 		resp, body := httpPost("/broadcast",
-			map[string]string{headerAuthorization: bearerServerToken, "Content-Type": "application/json"},
+			map[string]string{headerAuthorization: bearerServerToken, headerContentType: "application/json"},
 			`{"event":"reload","payload":{}}`)
 		pass = resp != nil && resp.StatusCode == 200
 		detail = fmt.Sprintf("broadcast status=%v body=%q", statusOrNil(resp), body)
@@ -379,7 +380,7 @@ func scenarioBroadcastAllReachesEveryConnection() result {
 // queueing on broadcast" contract from the README).
 func scenarioBroadcastOfflinePlayerNoQueue() result {
 	resp, body := httpPost("/broadcast",
-		map[string]string{headerAuthorization: bearerServerToken, "Content-Type": "application/json"},
+		map[string]string{headerAuthorization: bearerServerToken, headerContentType: "application/json"},
 		`{"player_id":"7","event":"x","payload":{}}`)
 	pass := resp != nil && resp.StatusCode == 200
 	return result{"broadcast_offline_player_200_no_queue", pass, fmt.Sprintf("status=%v body=%q", statusOrNil(resp), body)}

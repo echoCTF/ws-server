@@ -47,6 +47,13 @@ If the intent is "deliver this to player X, now or later," use `/publish`.
 If the intent is "deliver this to player X if they happen to be connected,"
 use `/broadcast` with `player_id`.
 
+Queued delivery is best-effort and **not ordered relative to live traffic**.
+A player reconnecting is registered as live before their queue is flushed,
+so a `/publish` call that lands in that window is delivered immediately,
+ahead of older messages still waiting in their queue. If your application
+needs a guaranteed order, put a sequence number or timestamp in the
+payload and let the client sort, don't rely on arrival order.
+
 ### WebSocket
 
 * `GET /ws?token=PLAYER_TOKEN`
@@ -208,5 +215,6 @@ go build
 ## Notes
 
 * Designed to be stateless except for in-memory queues
-* Offline messages are best-effort (not persisted)
+* Offline messages are best-effort (not persisted) and not ordered relative
+  to live traffic, see "Broadcast vs. Publish: offline behavior" above
 * Suitable for game backends, notification systems, and real-time apps

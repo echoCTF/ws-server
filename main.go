@@ -407,6 +407,19 @@ func validateToken(token string, isServer bool) (string, error) {
 // registerConnection registers a websocket connection for a player, storing the associated token.
 // It also increments the active connections metric and flushes any pending messages to the new connection.
 // Returns the wsConnection so the caller can use its serialized write helpers.
+//
+// Not ordered relative to live traffic: the connection is inserted into
+// players (making it visible to publishHandler/broadcastHandler as "online")
+// before flushPendingMessages runs. A /publish call that lands in that
+// window sees the player as connected and delivers live immediately,
+// which can reach the client before an older message still sitting in
+// their queue gets flushed a moment later. wsConnection.mu only serializes
+// the writes against each other (no frame corruption), it doesn't order
+// them; whichever call reaches wc.mu first is written first. Not fixed
+// here because it would mean holding mu for the duration of the flush,
+// blocking every other player's publish/broadcast on this one player's
+// queue length; if strict ordering is ever needed, it belongs in the
+// message payload (sequence number/timestamp), not in this lock.
 func registerConnection(playerID string, c *websocket.Conn, token string) *wsConnection {
 	wc := &wsConnection{conn: c, token: token}
 
